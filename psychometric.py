@@ -22,7 +22,6 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-from scipy import stats as scipy_stats
 
 logger = logging.getLogger(__name__)
 
