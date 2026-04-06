@@ -62,72 +62,71 @@ log = logging.getLogger("stgs")
 #  CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Mode 1 exam structures (Category → count)
+# Mode 1 exam structures  ── names kept exactly as in the original Arabic script
 MODE1_EXAMS: dict[str, dict[str, int]] = {
-    "Qudrat Ilmi (Scientific)": {
+    "قدرات علمي": {
         "MAR": 5, "MAL": 1, "MAN": 2, "MGE": 3,
         "VAN": 3, "VCA": 2, "VSC": 3, "VRC": 5,
     },
-    "Qudrat Nazari (Literary)": {
-        "Arithmetic": 3, "Graphical": 1, "Geometry": 2,
-        "Verbal Analogy": 5, "Contextual Error": 4,
-        "Sentence Completion": 3, "Reading Comprehension": 6,
+    "قدرات نظري": {
+        "حساب": 3, "بياني": 1, "هندسة": 2,
+        "التناظر اللفظي": 5, "الخطأ السياقي": 4,
+        "إكمال الجمل": 3, "استيعاب المقروء": 6,
     },
-    "Cognitive Ability": {
-        "Synonyms & Antonyms": 2, "Verbal Reasoning": 2,
-        "Verbal Comprehension": 2, "Arithmetic Operations": 3,
-        "Number Series": 2, "Data Interpretation": 2,
-        "Figure Series": 1, "Figure Matching": 1,
-        "Box Opening": 2, "Inferential": 3,
+    "القدرة المعرفية": {
+        "المترادفات والمتضادات": 2, "الاستدلال اللفظي": 2,
+        "الاستيعاب اللفظي": 2, "العمليات الحسابية": 3,
+        "سلاسل الأرقام": 2, "تفسير البيانات": 2,
+        "سلاسل الأشكال": 1, "تطابق الأشكال": 1,
+        "فتح الصندوق": 2, "الاستنباطي": 3,
     },
-    "Achievement Test (Tahsili)": {
-        "Biology": 18, "Chemistry": 18, "Physics": 18, "Mathematics": 18,
+    "التحصيلي": {
+        "أحياء": 18, "كيمياء": 18, "فيزياء": 18, "الرياضيات": 18,
     },
-    "University Abilities": {
-        "Arithmetic": 2, "Algebra": 2, "Graphical": 2, "Geometry": 2,
+    "قدرات الجامعيين": {
+        "MAR": 2, "MAL": 2, "MAN": 2, "MGE": 2,
         "CT1": 2, "CT2": 3, "CT3": 5,
-        "Verbal Analogy": 2, "Contextual Error": 2,
-        "Reading Comprehension": 2, "Sentence Completion": 2,
+        "VAN": 2, "VCA": 2, "VRC": 2, "VSC": 2,
     },
     "Custom": {},
 }
 
-# Mode 1 difficulty stages
+# Mode 1 difficulty stages  ── original names: Stage1, E, M, D, Manually set
 MODE1_STAGES: dict[str, dict] = {
-    "Stage 1 — General":  {"Range": (0.20, 0.90), "Mean": (0.52, 0.58)},
-    "Easy (E)":           {"Range": (0.00, 0.45), "Mean": (0.27, 0.35)},
-    "Medium (M)":         {"Range": (0.40, 0.75), "Mean": (0.55, 0.61)},
-    "Hard (D)":           {"Range": (0.70, 1.00), "Mean": (0.80, 0.88)},
-    "Manually Set":       {"Range": None,          "Mean": None},
+    "Stage1":        {"Range": (0.20, 0.90), "Mean": (0.52, 0.58)},
+    "E":             {"Range": (0.00, 0.45), "Mean": (0.27, 0.35)},
+    "M":             {"Range": (0.40, 0.75), "Mean": (0.55, 0.61)},
+    "D":             {"Range": (0.70, 1.00), "Mean": (0.80, 0.88)},
+    "Manually set":  {"Range": None,          "Mean": None},
 }
 
-# Mode 2 exam structures (learning outcome → count, used as template)
+# Mode 2 exam structures  ── names kept exactly as in the original Arabic script
 MODE2_EXAMS: dict[str, dict[str, int]] = {
-    "Cognitive Ability": {
-        "Synonyms & Antonyms": 2, "Verbal Reasoning": 2,
-        "Verbal Comprehension": 2, "Arithmetic Operations": 3,
-        "Number Series": 2, "Data Interpretation": 2,
-        "Figure Series": 1, "Figure Matching": 1,
-        "Box Opening": 2, "Inferential": 3,
+    "القدرة المعرفية": {
+        "المترادفات والمتضادات": 2, "الاستدلال اللفظي": 2,
+        "الاستيعاب اللفظي": 2, "العمليات الحسابية": 3,
+        "سلاسل الأرقام": 2, "تفسير البيانات": 2,
+        "سلاسل الأشكال": 1, "تطابق الأشكال": 1,
+        "فتح الصندوق": 2, "الاستنباطي": 3,
     },
-    "Nafis 4 Questions": {"1": 1, "2": 1, "3": 1, "4": 1},
-    "Nafis 5 Questions": {"1": 1, "2": 1, "3": 1, "4": 1, "5": 1},
+    "نافس 4 أسئلة": {"1": 1, "2": 1, "3": 1, "4": 1},
+    "نافس 5 أسئلة": {"1": 1, "2": 1, "3": 1, "4": 1, "5": 1},
     "Custom": {},
 }
 
-# Mode 2 difficulty stages
+# Mode 2 difficulty stages  ── original Arabic names from Script 2
 MODE2_STAGES: dict[str, dict] = {
-    "Science — Grade 3":      {"Range": (0.20, 0.80), "Mean": (0.50, 0.52)},
-    "Science — Grade 6":      {"Range": (0.20, 0.80), "Mean": (0.58, 0.62)},
-    "Science — Grade 9":      {"Range": (0.20, 0.80), "Mean": (0.58, 0.62)},
-    "Mathematics — Grade 3":  {"Range": (0.20, 0.80), "Mean": (0.48, 0.52)},
-    "Mathematics — Grade 6":  {"Range": (0.20, 0.80), "Mean": (0.58, 0.62)},
-    "Mathematics — Grade 9":  {"Range": (0.20, 0.80), "Mean": (0.64, 0.68)},
-    "Reading — Grade 3":      {"Range": (0.20, 0.80), "Mean": (0.48, 0.52)},
-    "Reading — Grade 6":      {"Range": (0.20, 0.80), "Mean": (0.58, 0.62)},
-    "Reading — Grade 9":      {"Range": (0.20, 0.80), "Mean": (0.48, 0.52)},
-    "General":                {"Range": (0.20, 0.80), "Mean": (0.50, 0.52)},
-    "Manually Set":           {"Range": None,          "Mean": None},
+    "علوم صف الثالث":          {"Range": (0.20, 0.80), "Mean": (0.50, 0.52)},
+    "علوم صف السادس":          {"Range": (0.20, 0.80), "Mean": (0.58, 0.62)},
+    "علوم الصف التاسع":        {"Range": (0.20, 0.80), "Mean": (0.58, 0.62)},
+    "الرياضيات الصف الثالث":   {"Range": (0.20, 0.80), "Mean": (0.48, 0.52)},
+    "الرياضيات الصف السادس":   {"Range": (0.20, 0.80), "Mean": (0.58, 0.62)},
+    "الرياضيات الصف التاسع":   {"Range": (0.20, 0.80), "Mean": (0.64, 0.68)},
+    "القراءة الصف الثالث":     {"Range": (0.20, 0.80), "Mean": (0.48, 0.52)},
+    "القراءة الصف السادس":     {"Range": (0.20, 0.80), "Mean": (0.58, 0.62)},
+    "القراءة الصف التاسع":     {"Range": (0.20, 0.80), "Mean": (0.48, 0.52)},
+    "عام":                     {"Range": (0.20, 0.80), "Mean": (0.50, 0.52)},
+    "Manually set":            {"Range": None,          "Mean": None},
 }
 
 BIN_LABELS = [f"{i*0.1:.1f}-{(i+1)*0.1:.1f}" for i in range(10)]
@@ -1067,12 +1066,12 @@ class LauncherWindow(tk.Tk):
         self._tile(tiles, "📋",
                    "Mode 1",
                    "National & Standardised Exams",
-                   ("Qudrat Ilmi · Qudrat Nazari\n"
-                    "Achievement Test · Cognitive Ability\n"
-                    "University Abilities\n\n"
+                   ("قدرات علمي · قدرات نظري\n"
+                    "التحصيلي · القدرة المعرفية\n"
+                    "قدرات الجامعيين\n\n"
                     "Classification column : Category\n"
                     "Domain column         : D\n"
-                    "Difficulty stages     : E · M · D · Stage 1"),
+                    "Difficulty stages     : Stage1 · E · M · D"),
                    "#2980B9", self._open1, col=0)
 
         tk.Frame(tiles, bg="#3A5070", width=2).grid(
@@ -1081,9 +1080,9 @@ class LauncherWindow(tk.Tk):
         self._tile(tiles, "🏫",
                    "Mode 2",
                    "Educational & Curriculum Assessments",
-                   ("Science · Mathematics · Reading\n"
-                    "Grades 3 · 6 · 9\n"
-                    "Nafis · Cognitive Ability\n\n"
+                   ("علوم · رياضيات · قراءة\n"
+                    "الصف الثالث · السادس · التاسع\n"
+                    "نافس · القدرة المعرفية\n\n"
                     "Learning outcome column : الناتج\n"
                     "Indicator column        : المؤشر\n"
                     "Filters: Subject · Grade · Language"),
