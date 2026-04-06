@@ -348,68 +348,98 @@ class AssemblyParams:
     rng_seed:           Optional[int] = None
 
 
-def _pick_random(pool: pd.DataFrame, count: int,
-                 used_questions: pd.DataFrame,
+def _pick_random(pool: pd.DataFrame,
+                 count: int,
+                 used_ids_this_form: set,   # QuestionID strings already in this form
                  allow_partial: bool,
                  label: str,
                  form_number: int,
-                 question_usage: dict,
+                 question_usage: dict,       # qid → cross-form use count
                  dcol: str,
                  rng: np.random.Generator,
                  allow_reuse: bool,
-                 max_reuse: int
+                 max_reuse: int,
                  ) -> tuple[pd.DataFrame, list[str]]:
     """
-    Pick `count` items from `pool` that are not yet in `used_questions`.
-    Returns (selected_df, missing_labels).
-    Replicates the _pick_from_pool() logic from Script 2.
-    """
-    warnings = []
-    unused = pool[~pool.index.isin(used_questions.index)]
+    Pick `count` items from `pool`.
 
-    if len(unused) >= count:
-        idx = rng.choice(len(unused), size=count, replace=False)
-        selected = unused.iloc[idx].copy()
+    Uniqueness rules
+    ----------------
+    • A question is NEVER selected twice in the same form (guaranteed by
+      used_ids_this_form — keyed on QuestionID, so bin fallbacks cannot
+      re-pick something already chosen earlier in the same form).
+    • Across forms, reuse is controlled by allow_reuse / max_reuse:
+        allow_reuse=False  → question used in any previous form is excluded
+        allow_reuse=True   → question may appear in up to max_reuse (2) forms
+    """
+    qid_col = "QuestionID"
+    warnings: list[str] = []
+
+    # Exclude items already selected this form (by QuestionID — the true key)
+    if used_ids_this_form and qid_col in pool.columns:
+        pool = pool[~pool[qid_col].astype(str).isin(used_ids_this_form)].copy()
+
+    if len(pool) >= count:
+        idx = rng.choice(len(pool), size=count, replace=False)
+        selected = pool.iloc[idx].copy()
     elif allow_partial:
-        selected = unused.copy()
+        selected = pool.copy()
         needed = count - len(selected)
         if needed > 0:
             placeholder = pd.DataFrame({
-                col: ([label] * needed if col in ("Category","الناتج") else
+                col: ([label] * needed if col in ("Category", "الناتج") else
                       [None]  * needed if col == dcol else
                       ["*** No questions found ***"] * needed)
                 for col in pool.columns
             })
             selected = pd.concat([selected, placeholder], ignore_index=True)
-            warnings.append(f"Form {form_number}: shortage of {needed} for '{label}' — placeholder rows added.")
+            warnings.append(
+                f"Form {form_number}: shortage of {needed} for '{label}' "
+                f"— placeholder rows added.")
     else:
-        # Try reuse pool (items used < max_reuse times)
-        reuse_pool = pool[pool.index.map(lambda i: question_usage.get(i, 0) < max_reuse)]
+        # Try reuse pool: items whose cross-form count < max_reuse
+        if allow_reuse and qid_col in pool.columns:
+            reuse_pool = pool[
+                pool[qid_col].astype(str).map(
+                    lambda q: question_usage.get(q, 0) < max_reuse
+                )
+            ].copy()
+        else:
+            reuse_pool = pool.copy()
+
         if len(reuse_pool) >= count:
             idx = rng.choice(len(reuse_pool), size=count, replace=False)
             selected = reuse_pool.iloc[idx].copy()
         else:
             selected = pd.DataFrame({
-                col: ([label] * count if col in ("Category","الناتج") else
+                col: ([label] * count if col in ("Category", "الناتج") else
                       [None]  * count if col == dcol else
                       ["*** Not enough questions ***"] * count)
                 for col in pool.columns
             })
-            warnings.append(f"Form {form_number}: not enough items for '{label}' — {count} placeholders.")
+            warnings.append(
+                f"Form {form_number}: not enough items for '{label}' "
+                f"— {count} placeholder rows added.")
 
     return selected, warnings
 
 
 class AssemblyEngine:
     """
-    Stratified bin sampling engine.
+    Stratified bell-curve bin sampling engine.
 
-    For each slot:
-      1. Filter bank by slot.filters and the global diff_range
-      2. If bins are defined, split into sub-ranges and randomly pick
-         the required count from each bin window (half-open: [low, high))
-      3. If no bins, pick randomly from the whole filtered pool
-      4. Track usage by original DataFrame index
+    Uniqueness guarantee
+    --------------------
+    Each form maintains an `intra_form_used_ids` set of QuestionIDs.
+    This set is passed into every _pick_random call, so it is impossible
+    for the same question to appear twice in a single form — even when
+    bin fallback widens the pool to the full slot or global bank.
+
+    Cross-form reuse
+    ----------------
+    Controlled by AssemblyParams.allow_reuse and .max_reuse (default 2).
+    When allow_reuse=True a question may appear in at most max_reuse
+    different forms but NEVER more than once within any single form.
     """
 
     def __init__(self, bank: pd.DataFrame, params: AssemblyParams,
@@ -419,88 +449,99 @@ class AssemblyEngine:
         self.params = params
         self.dcol   = dcol
         self.rng    = np.random.default_rng(params.rng_seed)
-        # usage[original_index] = number of forms it has been used in
-        self.question_usage: dict[int, int] = usage or {}
+        # usage[QuestionID_str] = number of forms it has been used in
+        self.question_usage: dict[str, int] = usage or {}
 
     # ── public ────────────────────────────────────────────────────────────────
     def assemble_one_form(self, form_number: int
                           ) -> tuple[pd.DataFrame, float, list[str]]:
-        """
-        Assemble one form. Returns (form_df, mean_difficulty, warnings).
-        """
+        """Returns (form_df, mean_difficulty, warnings)."""
         p = self.params
-        used_questions = pd.DataFrame()
+        # intra_form_used_ids tracks QuestionIDs already placed in THIS form
+        intra_form_used_ids: set[str] = set()
         form_parts: list[pd.DataFrame] = []
         all_warnings: list[str] = []
 
         for slot in p.slots:
-            pool = self._pool_for_slot(slot, used_questions)
+            pool = self._pool_for_slot(slot, intra_form_used_ids)
 
-            # Use manual bins if provided, otherwise auto bell-curve bins
+            # Bell-curve bins (auto or manual)
             bins = slot.bins if slot.bins else _auto_bins(
                 slot.count,
                 p.diff_range,
-                float(np.mean(p.diff_mean_range)) if p.diff_mean_range else
-                (p.diff_range[0] + p.diff_range[1]) / 2.0,
+                float(np.mean(p.diff_mean_range)) if p.diff_mean_range
+                else (p.diff_range[0] + p.diff_range[1]) / 2.0,
             )
 
             for bdef in bins:
                 bin_pool = pool[
                     (pool[self.dcol] >= bdef.low) &
                     (pool[self.dcol] <  bdef.high)   # half-open [low, high)
-                ]
-                # If the exact bin is empty, pull from the nearest available
+                ].copy()
                 if bin_pool.empty:
-                    bin_pool = pool   # fallback to full slot pool
+                    bin_pool = pool.copy()   # fallback to full slot pool
+
                 sel, warns = _pick_random(
-                    bin_pool, bdef.count, used_questions,
+                    bin_pool, bdef.count,
+                    intra_form_used_ids,       # ← correct dedup key
                     p.allow_partial_fill,
                     f"{slot.label} [{bdef.low:.1f}-{bdef.high:.1f}]",
                     form_number, self.question_usage,
-                    self.dcol, self.rng, p.allow_reuse, p.max_reuse
+                    self.dcol, self.rng, p.allow_reuse, p.max_reuse,
                 )
                 sel["_form"] = form_number
                 form_parts.append(sel)
-                used_questions = pd.concat([used_questions, sel])
                 all_warnings.extend(warns)
 
+                # Register the newly selected IDs so later bins/slots skip them
+                if "QuestionID" in sel.columns:
+                    intra_form_used_ids.update(
+                        sel["QuestionID"].dropna().astype(str).tolist()
+                    )
+
         form = pd.concat(form_parts, ignore_index=True) if form_parts else pd.DataFrame()
-        difficulties = pd.to_numeric(
-            form[self.dcol], errors="coerce").dropna().tolist()
+        difficulties = pd.to_numeric(form[self.dcol], errors="coerce").dropna().tolist()
         mean_d = float(np.mean(difficulties)) if difficulties else 0.0
         return form, mean_d, all_warnings
 
     # ── helpers ───────────────────────────────────────────────────────────────
     def _pool_for_slot(self, slot: SlotDef,
-                       used_questions: pd.DataFrame) -> pd.DataFrame:
-        p = self.params
+                       intra_form_used_ids: set[str]) -> pd.DataFrame:
+        p   = self.params
         pool = self.bank.copy()
 
-        # apply slot column filters
+        # Apply slot column filters (Category / الناتج / المؤشر)
         for col, val in slot.filters.items():
             if col in pool.columns and val not in (None, "", "nan"):
                 pool = pool[pool[col].astype(str) == str(val)]
 
-        # remove already-used items this form
-        if not used_questions.empty and pool.index.isin(used_questions.index).any():
-            pool = pool[~pool.index.isin(used_questions.index)]
+        # Remove questions already in this form (by QuestionID)
+        if intra_form_used_ids and "QuestionID" in pool.columns:
+            pool = pool[~pool["QuestionID"].astype(str).isin(intra_form_used_ids)]
 
-        # exclude items used too many times across forms
+        # Cross-form exclusion
         if not p.allow_reuse:
-            overused = {i for i, c in self.question_usage.items()
+            # Exclude every question used in any previous form
+            overused = {q for q, c in self.question_usage.items() if c >= 1}
+            if "QuestionID" in pool.columns:
+                pool = pool[~pool["QuestionID"].astype(str).isin(overused)]
+        else:
+            # Allow reuse but cap at max_reuse forms
+            overused = {q for q, c in self.question_usage.items()
                         if c >= p.max_reuse}
-            pool = pool[~pool.index.isin(overused)]
+            if "QuestionID" in pool.columns:
+                pool = pool[~pool["QuestionID"].astype(str).isin(overused)]
 
-        # discrimination filter
+        # Discrimination filter
         disc_col = "Discrimination" if "Discrimination" in pool.columns else "تمييز"
         if p.min_discrimination is not None and disc_col in pool.columns:
             pool = pool[pool[disc_col] >= p.min_discrimination]
 
-        # global difficulty range
+        # Global difficulty range
         lo, hi = p.diff_range
         pool = pool[(pool[self.dcol] >= lo) & (pool[self.dcol] <= hi)]
 
-        return pool.reset_index(drop=False)   # keep original index accessible
+        return pool.reset_index(drop=True)
 
 
 def assemble_forms(bank: pd.DataFrame,
@@ -514,7 +555,8 @@ def assemble_forms(bank: pd.DataFrame,
     Uses a retry loop (up to params.max_retries) per form to satisfy
     the mean criterion — mirrors the original 100-retry logic.
     """
-    usage: dict[int, int] = {}
+    # usage[QuestionID_str] = how many forms it has appeared in so far
+    usage: dict[str, int] = {}
     results: list[tuple[pd.DataFrame, float, list[str]]] = []
     mn_range = params.diff_mean_range
 
@@ -530,7 +572,7 @@ def assemble_forms(bank: pd.DataFrame,
                 p2 = AssemblyParams(**{
                     **params.__dict__,
                     "rng_seed": seed,
-                    "diff_mean_range": None,   # skip mean check during retry
+                    "diff_mean_range": None,
                 })
                 eng2 = AssemblyEngine(bank, p2, dcol, dict(usage))
                 form2, mean2, w2 = eng2.assemble_one_form(fidx + 1)
@@ -545,10 +587,10 @@ def assemble_forms(bank: pd.DataFrame,
                     f"(achieved {best_mean:.3f})."
                 )
 
-        # update usage from final form
-        for idx in best_form.index:
-            orig = best_form.at[idx, "index"] if "index" in best_form.columns else idx
-            usage[orig] = usage.get(orig, 0) + 1
+        # Update cross-form usage by QuestionID (the only reliable unique key)
+        if "QuestionID" in best_form.columns:
+            for qid in best_form["QuestionID"].dropna().astype(str):
+                usage[qid] = usage.get(qid, 0) + 1
 
         log.info("%s: %d items, mean_diff=%.3f%s",
                  name, len(best_form), best_mean,
@@ -817,8 +859,8 @@ def write_forms_workbook(
             ws.set_column(ci, ci, cw)
 
         for ri, (_, row) in enumerate(df.iterrows()):
-            orig_idx = row.get("index", ri)
-            reused   = question_usage.get(orig_idx, 0) > 1
+            qid    = str(row.get("QuestionID", ""))
+            reused = question_usage.get(qid, 0) > 1
             for ci, (cn, _, is_n) in enumerate(export_cols):
                 val = row.get(cn, "")
                 if is_n:
@@ -1288,7 +1330,7 @@ class Mode1Window(_BaseMode):
         for row, (var, text) in enumerate([
             (self._stats_var,   "Enable discrimination filter (Discrimination ≥ 0.85)"),
             (self._partial_var, "Allow partial fill (placeholder rows when short)"),
-            (self._reuse_var,   "Allow question reuse across forms"),
+            (self._reuse_var,   "Allow reuse across forms (max 2 times per question, never in same form)"),
         ], start=4):
             tk.Checkbutton(pf, text=text, variable=var,
                            bg=BG_L, fg=TXD, font=FB).grid(
@@ -1532,12 +1574,12 @@ class Mode1Window(_BaseMode):
             ap = base / f"{prefix}_3PL_Analysis.xlsx"
             rp = base / f"{prefix}_Remaining_Questions.xlsx"
 
-            # Usage tracking: by original DataFrame index
-            usage: dict = {}
+            # Usage tracking: by QuestionID
+            usage: dict[str, int] = {}
             for form, _, _ in results:
-                if "index" in form.columns:
-                    for idx in form["index"]:
-                        usage[idx] = usage.get(idx, 0) + 1
+                if "QuestionID" in form.columns:
+                    for qid in form["QuestionID"].dropna().astype(str):
+                        usage[qid] = usage.get(qid, 0) + 1
 
             write_forms_workbook(
                 results, names, analyses,
@@ -1546,11 +1588,13 @@ class Mode1Window(_BaseMode):
             valid = [fa for fa in analyses if fa]
             if valid: write_analysis_workbook(valid, ap)
 
-            used_set = set()
+            used_ids = set()
             for form, _, _ in results:
-                if "index" in form.columns:
-                    used_set.update(form["index"].astype(int).tolist())
-            remaining = self.bank_df[~self.bank_df.index.isin(used_set)].copy()
+                if "QuestionID" in form.columns:
+                    used_ids.update(form["QuestionID"].dropna().astype(str).tolist())
+            remaining = self.bank_df[
+                ~self.bank_df["QuestionID"].astype(str).isin(used_ids)
+            ].copy()
             remaining.to_excel(str(rp), index=False, engine="openpyxl")
 
             self._q.put(("prog", 100))
@@ -1805,7 +1849,7 @@ class Mode2Window(_BaseMode):
         for row, (var, text) in enumerate([
             (self._stats_var,   "Enable discrimination filter (تمييز ≥ 0.50)"),
             (self._partial_var, "Allow partial fill (placeholder rows when short)"),
-            (self._reuse_var,   "Allow question reuse across forms"),
+            (self._reuse_var,   "Allow reuse across forms (max 2 times per question, never in same form)"),
         ], start=4):
             tk.Checkbutton(pf, text=text, variable=var,
                            bg=BG_L, fg=TXD, font=FB).grid(
@@ -2062,11 +2106,11 @@ class Mode2Window(_BaseMode):
             ap = base / f"{prefix}_3PL_Analysis.xlsx"
             rp = base / f"{prefix}_Remaining_Questions.xlsx"
 
-            usage: dict = {}
+            usage: dict[str, int] = {}
             for form, _, _ in results:
-                if "index" in form.columns:
-                    for idx in form["index"]:
-                        usage[idx] = usage.get(idx, 0) + 1
+                if "QuestionID" in form.columns:
+                    for qid in form["QuestionID"].dropna().astype(str):
+                        usage[qid] = usage.get(qid, 0) + 1
 
             write_forms_workbook(
                 results, names, analyses,
@@ -2075,11 +2119,11 @@ class Mode2Window(_BaseMode):
             valid = [fa for fa in analyses if fa]
             if valid: write_analysis_workbook(valid, ap)
 
-            used_set = set()
+            used_ids = set()
             for form, _, _ in results:
-                if "index" in form.columns:
-                    used_set.update(form["index"].astype(int).tolist())
-            remaining = df[~df.index.isin(used_set)].copy()
+                if "QuestionID" in form.columns:
+                    used_ids.update(form["QuestionID"].dropna().astype(str).tolist())
+            remaining = df[~df["QuestionID"].astype(str).isin(used_ids)].copy()
             remaining.drop(columns=[c for c in remaining.columns if c.startswith("_")],
                            errors="ignore").to_excel(str(rp), index=False, engine="openpyxl")
 
