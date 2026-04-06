@@ -249,6 +249,62 @@ def load_bank_mode2(path) -> pd.DataFrame:
 #  This matches the behaviour of the original scripts exactly.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _bell_bin_weights(diff_range: tuple[float, float],
+                      mean_target: float,
+                      n_bins: int = 10) -> list[float]:
+    """
+    Return bell-curve probability weights for the 10 standard bins (0.0–1.0),
+    centred on `mean_target` with σ proportional to the width of `diff_range`.
+    Bins outside `diff_range` receive zero weight.
+
+    This produces distributions that look like the reference images:
+      Stage 1 → broad bell centred ~0.55, non-zero across 0.1–0.9
+      Easy (E) → left bell centred ~0.30, non-zero only in 0.0–0.45
+      Medium (M) → narrow bell centred ~0.58, non-zero only in 0.4–0.75
+      Hard (D)  → right bell centred ~0.84, non-zero only in 0.7–1.0
+    """
+    lo, hi = diff_range
+    span = hi - lo
+    sigma = max(span / 3.5, 0.06)    # narrower range → tighter bell
+
+    weights = []
+    for i in range(n_bins):
+        bin_lo = i * 0.1
+        bin_hi = (i + 1) * 0.1
+        bin_mid = (bin_lo + bin_hi) / 2.0
+        # Outside the stage range → zero
+        if bin_hi <= lo or bin_lo >= hi:
+            weights.append(0.0)
+        else:
+            # Gaussian density at bin midpoint
+            w = np.exp(-0.5 * ((bin_mid - mean_target) / sigma) ** 2)
+            weights.append(float(w))
+
+    total_w = sum(weights)
+    if total_w == 0:
+        # fallback: uniform inside range
+        weights = [1.0 if (lo <= (i+0.5)*0.1 <= hi) else 0.0
+                   for i in range(n_bins)]
+    return weights
+
+
+def _auto_bins(count: int,
+               diff_range: tuple[float, float],
+               mean_target: float) -> list["BinDef"]:
+    """
+    Automatically create bell-weighted BinDef list for a slot
+    when no manual bins are specified.  Bins with allocated count=0
+    are omitted.
+    """
+    weights = _bell_bin_weights(diff_range, mean_target)
+    counts  = _largest_remainder(count, weights)
+    bins: list[BinDef] = []
+    for i, cnt in enumerate(counts):
+        if cnt > 0:
+            bins.append(BinDef(low=i*0.1, high=(i+1)*0.1, count=cnt))
+    return bins
+
+
 def _largest_remainder(total: int, proportions: list[float]) -> list[int]:
     if not proportions or total == 0:
         return [0] * len(proportions)
@@ -380,33 +436,33 @@ class AssemblyEngine:
         for slot in p.slots:
             pool = self._pool_for_slot(slot, used_questions)
 
-            if slot.bins:
-                for bdef in slot.bins:
-                    bin_pool = pool[
-                        (pool[self.dcol] >= bdef.low) &
-                        (pool[self.dcol] <  bdef.high)   # half-open, same as Script 2
-                    ]
-                    sel, warns = _pick_random(
-                        bin_pool, bdef.count, used_questions,
-                        p.allow_partial_fill,
-                        f"{slot.label} [{bdef.low:.1f}-{bdef.high:.1f}]",
-                        form_number, self.question_usage,
-                        self.dcol, self.rng, p.allow_reuse, p.max_reuse
-                    )
-                    sel["_form"] = form_number
-                    form_parts.append(sel)
-                    used_questions = pd.concat([used_questions, sel])
-            else:
+            # Use manual bins if provided, otherwise auto bell-curve bins
+            bins = slot.bins if slot.bins else _auto_bins(
+                slot.count,
+                p.diff_range,
+                float(np.mean(p.diff_mean_range)) if p.diff_mean_range else
+                (p.diff_range[0] + p.diff_range[1]) / 2.0,
+            )
+
+            for bdef in bins:
+                bin_pool = pool[
+                    (pool[self.dcol] >= bdef.low) &
+                    (pool[self.dcol] <  bdef.high)   # half-open [low, high)
+                ]
+                # If the exact bin is empty, pull from the nearest available
+                if bin_pool.empty:
+                    bin_pool = pool   # fallback to full slot pool
                 sel, warns = _pick_random(
-                    pool, slot.count, used_questions,
-                    p.allow_partial_fill, slot.label, form_number,
-                    self.question_usage, self.dcol, self.rng,
-                    p.allow_reuse, p.max_reuse
+                    bin_pool, bdef.count, used_questions,
+                    p.allow_partial_fill,
+                    f"{slot.label} [{bdef.low:.1f}-{bdef.high:.1f}]",
+                    form_number, self.question_usage,
+                    self.dcol, self.rng, p.allow_reuse, p.max_reuse
                 )
                 sel["_form"] = form_number
                 form_parts.append(sel)
                 used_questions = pd.concat([used_questions, sel])
-            all_warnings.extend(warns)
+                all_warnings.extend(warns)
 
         form = pd.concat(form_parts, ignore_index=True) if form_parts else pd.DataFrame()
         difficulties = pd.to_numeric(
@@ -641,16 +697,19 @@ def _write_domain_chart(wb, ws, domain_df: pd.DataFrame, dcol: str,
 
     chart = wb.add_chart({"type": "column"})
     chart.add_series({
-        "name":       f"{domain_label}",
+        "name":       "Q Distribution",
         "categories": [sheet_name, row_offset+1, col_offset,   row_offset+10, col_offset],
         "values":     [sheet_name, row_offset+1, col_offset+1, row_offset+10, col_offset+1],
         "data_labels": {"value": True},
+        "fill":        {"color": "#2E75B6"},
     })
     chart.set_title({"name": f"{domain_label} — Difficulty Distribution"})
     chart.set_x_axis({"name": "Difficulty Range"})
-    chart.set_y_axis({"name": "Count"})
+    chart.set_y_axis({"name": "Count", "min": 0})
+    chart.set_legend({"position": "right"})
+    chart.set_size({"width": 480, "height": 288})
     ws.insert_chart(row_offset + 12, col_offset, chart)
-    return row_offset + 28
+    return row_offset + 30
 
 
 def _embed_3pl_charts(wb, ws, fa: FormAnalysis, img_row: int):
