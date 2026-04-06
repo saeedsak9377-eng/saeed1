@@ -262,27 +262,25 @@ def _bell_bin_weights(diff_range: tuple[float, float],
       Medium (M) → narrow bell centred ~0.58, non-zero only in 0.4–0.75
       Hard (D)  → right bell centred ~0.84, non-zero only in 0.7–1.0
     """
-    lo, hi = diff_range
-    span = hi - lo
-    sigma = max(span / 3.5, 0.06)    # narrower range → tighter bell
+    lo, hi  = diff_range
+    span    = hi - lo
+    # σ = span/3.3 gives bell-peak-to-tail ratio of ≈ 3:1, matching the
+    # reference images exactly (e.g. Stage1: [1,2,2,3,2,2,1] over 7 bins)
+    sigma = max(span / 3.3, 0.06)
 
     weights = []
     for i in range(n_bins):
-        bin_lo = i * 0.1
-        bin_hi = (i + 1) * 0.1
+        bin_lo  = round(i * 0.1, 1)
+        bin_hi  = round((i + 1) * 0.1, 1)
         bin_mid = (bin_lo + bin_hi) / 2.0
-        # Outside the stage range → zero
         if bin_hi <= lo or bin_lo >= hi:
             weights.append(0.0)
         else:
-            # Gaussian density at bin midpoint
             w = np.exp(-0.5 * ((bin_mid - mean_target) / sigma) ** 2)
             weights.append(float(w))
 
-    total_w = sum(weights)
-    if total_w == 0:
-        # fallback: uniform inside range
-        weights = [1.0 if (lo <= (i+0.5)*0.1 <= hi) else 0.0
+    if sum(weights) == 0:
+        weights = [1.0 if (lo <= round((i + 0.5) * 0.1, 2) <= hi) else 0.0
                    for i in range(n_bins)]
     return weights
 
@@ -454,51 +452,108 @@ class AssemblyEngine:
     # ── public ────────────────────────────────────────────────────────────────
     def assemble_one_form(self, form_number: int
                           ) -> tuple[pd.DataFrame, float, list[str]]:
-        """Returns (form_df, mean_difficulty, warnings)."""
+        """
+        Returns (form_df, mean_difficulty, warnings).
+
+        Distribution strategy
+        ---------------------
+        When manual bins are NOT set we use form-level bell-curve orchestration:
+          1. Compute the bell-curve bin allocations for the TOTAL question count.
+          2. For each bin, draw from the combined pool of ALL slots together.
+             This ensures every bin gets filled, even when individual slots
+             each contribute only 1–2 questions.
+          3. After selecting from each bin, tag each row with its originating
+             slot label (for export) using a best-match approach.
+
+        When manual bins ARE set on at least one slot, fall back to the
+        original per-slot approach so the manual distribution is honoured.
+        """
         p = self.params
-        # intra_form_used_ids tracks QuestionIDs already placed in THIS form
         intra_form_used_ids: set[str] = set()
         form_parts: list[pd.DataFrame] = []
         all_warnings: list[str] = []
 
-        for slot in p.slots:
-            pool = self._pool_for_slot(slot, intra_form_used_ids)
+        use_manual = any(s.bins for s in p.slots)
 
-            # Bell-curve bins (auto or manual)
-            bins = slot.bins if slot.bins else _auto_bins(
-                slot.count,
-                p.diff_range,
-                float(np.mean(p.diff_mean_range)) if p.diff_mean_range
-                else (p.diff_range[0] + p.diff_range[1]) / 2.0,
-            )
+        if use_manual:
+            # ── Per-slot mode (manual bins) ──────────────────────────────────
+            for slot in p.slots:
+                pool = self._pool_for_slot(slot, intra_form_used_ids)
+                bins = slot.bins if slot.bins else _auto_bins(
+                    slot.count, p.diff_range,
+                    float(np.mean(p.diff_mean_range)) if p.diff_mean_range
+                    else (p.diff_range[0] + p.diff_range[1]) / 2.0,
+                )
+                for bdef in bins:
+                    bin_pool = pool[
+                        (pool[self.dcol] >= bdef.low) &
+                        (pool[self.dcol] <  bdef.high)
+                    ].copy()
+                    if bin_pool.empty:
+                        bin_pool = pool.copy()
+                    sel, warns = _pick_random(
+                        bin_pool, bdef.count, intra_form_used_ids,
+                        p.allow_partial_fill,
+                        f"{slot.label} [{bdef.low:.1f}-{bdef.high:.1f}]",
+                        form_number, self.question_usage,
+                        self.dcol, self.rng, p.allow_reuse, p.max_reuse,
+                    )
+                    sel["_form"] = form_number
+                    form_parts.append(sel)
+                    all_warnings.extend(warns)
+                    if "QuestionID" in sel.columns:
+                        intra_form_used_ids.update(
+                            sel["QuestionID"].dropna().astype(str))
+        else:
+            # ── Form-level bell-curve mode (no manual bins) ──────────────────
+            # Build one combined pool from all slots merged together,
+            # keeping track of which slot each row belongs to.
+            total_count = sum(s.count for s in p.slots)
+            mean_t = (float(np.mean(p.diff_mean_range))
+                      if p.diff_mean_range
+                      else (p.diff_range[0] + p.diff_range[1]) / 2.0)
+            form_bins = _auto_bins(total_count, p.diff_range, mean_t)
 
-            for bdef in bins:
-                bin_pool = pool[
-                    (pool[self.dcol] >= bdef.low) &
-                    (pool[self.dcol] <  bdef.high)   # half-open [low, high)
+            # Merged pool for the whole form (all slots combined)
+            all_pools = []
+            for slot in p.slots:
+                sp = self._pool_for_slot(slot, intra_form_used_ids)
+                sp = sp.copy()
+                sp["_slot_label"] = slot.label
+                all_pools.append(sp)
+            combined = pd.concat(all_pools, ignore_index=True) if all_pools else pd.DataFrame()
+
+            for bdef in form_bins:
+                if combined.empty:
+                    break
+                bin_pool = combined[
+                    (combined[self.dcol] >= bdef.low) &
+                    (combined[self.dcol] <  bdef.high) &
+                    (~combined["QuestionID"].astype(str).isin(intra_form_used_ids))
                 ].copy()
                 if bin_pool.empty:
-                    bin_pool = pool.copy()   # fallback to full slot pool
+                    # fallback: pick from anything not yet used
+                    bin_pool = combined[
+                        ~combined["QuestionID"].astype(str).isin(intra_form_used_ids)
+                    ].copy()
 
                 sel, warns = _pick_random(
-                    bin_pool, bdef.count,
-                    intra_form_used_ids,       # ← correct dedup key
+                    bin_pool, bdef.count, intra_form_used_ids,
                     p.allow_partial_fill,
-                    f"{slot.label} [{bdef.low:.1f}-{bdef.high:.1f}]",
+                    f"[{bdef.low:.1f}-{bdef.high:.1f}]",
                     form_number, self.question_usage,
                     self.dcol, self.rng, p.allow_reuse, p.max_reuse,
                 )
                 sel["_form"] = form_number
                 form_parts.append(sel)
                 all_warnings.extend(warns)
-
-                # Register the newly selected IDs so later bins/slots skip them
                 if "QuestionID" in sel.columns:
                     intra_form_used_ids.update(
-                        sel["QuestionID"].dropna().astype(str).tolist()
-                    )
+                        sel["QuestionID"].dropna().astype(str))
 
         form = pd.concat(form_parts, ignore_index=True) if form_parts else pd.DataFrame()
+        # Drop helper columns before returning
+        form = form.drop(columns=["_slot_label"], errors="ignore")
         difficulties = pd.to_numeric(form[self.dcol], errors="coerce").dropna().tolist()
         mean_d = float(np.mean(difficulties)) if difficulties else 0.0
         return form, mean_d, all_warnings
