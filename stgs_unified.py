@@ -474,16 +474,15 @@ class AssemblyEngine:
         all_warnings: list[str] = []
 
         use_manual = any(s.bins for s in p.slots)
+        mean_t = (float(np.mean(p.diff_mean_range))
+                  if p.diff_mean_range
+                  else (p.diff_range[0] + p.diff_range[1]) / 2.0)
 
         if use_manual:
-            # ── Per-slot mode (manual bins) ──────────────────────────────────
+            # ── Per-slot mode: manual bins honoured exactly ───────────────────
             for slot in p.slots:
                 pool = self._pool_for_slot(slot, intra_form_used_ids)
-                bins = slot.bins if slot.bins else _auto_bins(
-                    slot.count, p.diff_range,
-                    float(np.mean(p.diff_mean_range)) if p.diff_mean_range
-                    else (p.diff_range[0] + p.diff_range[1]) / 2.0,
-                )
+                bins = slot.bins
                 for bdef in bins:
                     bin_pool = pool[
                         (pool[self.dcol] >= bdef.low) &
@@ -505,51 +504,64 @@ class AssemblyEngine:
                         intra_form_used_ids.update(
                             sel["QuestionID"].dropna().astype(str))
         else:
-            # ── Form-level bell-curve mode (no manual bins) ──────────────────
-            # Build one combined pool from all slots merged together,
-            # keeping track of which slot each row belongs to.
-            total_count = sum(s.count for s in p.slots)
-            mean_t = (float(np.mean(p.diff_mean_range))
-                      if p.diff_mean_range
-                      else (p.diff_range[0] + p.diff_range[1]) / 2.0)
-            form_bins = _auto_bins(total_count, p.diff_range, mean_t)
-
-            # Merged pool for the whole form (all slots combined)
-            all_pools = []
+            # ── D-domain bell-curve mode ──────────────────────────────────────
+            # Group slots by their D value in the bank, then apply ONE bell
+            # curve per D domain.  This is exactly what the original
+            # add_subdomain_chart() was showing: one distribution per domain.
+            #
+            # Step 1: find the D value for every slot by peeking at the bank.
+            domain_col = "D" if "D" in self.bank.columns else "المجال"
+            slot_domains: dict[str, list] = {}   # domain → [slot, ...]
             for slot in p.slots:
+                # Build the slot pool to discover which D value its items have
                 sp = self._pool_for_slot(slot, intra_form_used_ids)
-                sp = sp.copy()
-                sp["_slot_label"] = slot.label
-                all_pools.append(sp)
-            combined = pd.concat(all_pools, ignore_index=True) if all_pools else pd.DataFrame()
+                if not sp.empty and domain_col in sp.columns:
+                    dom = str(sp[domain_col].mode().iloc[0])
+                else:
+                    dom = "__all__"
+                slot_domains.setdefault(dom, []).append(slot)
 
-            for bdef in form_bins:
-                if combined.empty:
-                    break
-                bin_pool = combined[
-                    (combined[self.dcol] >= bdef.low) &
-                    (combined[self.dcol] <  bdef.high) &
-                    (~combined["QuestionID"].astype(str).isin(intra_form_used_ids))
-                ].copy()
-                if bin_pool.empty:
-                    # fallback: pick from anything not yet used
-                    bin_pool = combined[
-                        ~combined["QuestionID"].astype(str).isin(intra_form_used_ids)
+            # Step 2: for each domain, build combined pool + apply bell curve
+            for domain, domain_slots in slot_domains.items():
+                domain_count = sum(s.count for s in domain_slots)
+                domain_bins  = _auto_bins(domain_count, p.diff_range, mean_t)
+
+                # Combined pool of all slots that belong to this domain
+                domain_parts = []
+                for slot in domain_slots:
+                    sp = self._pool_for_slot(slot, intra_form_used_ids)
+                    domain_parts.append(sp)
+                domain_pool = pd.concat(domain_parts, ignore_index=True) \
+                              if domain_parts else pd.DataFrame()
+
+                for bdef in domain_bins:
+                    if domain_pool.empty:
+                        break
+                    bin_pool = domain_pool[
+                        (domain_pool[self.dcol] >= bdef.low) &
+                        (domain_pool[self.dcol] <  bdef.high) &
+                        (~domain_pool["QuestionID"].astype(str)
+                          .isin(intra_form_used_ids))
                     ].copy()
+                    if bin_pool.empty:
+                        bin_pool = domain_pool[
+                            ~domain_pool["QuestionID"].astype(str)
+                             .isin(intra_form_used_ids)
+                        ].copy()
 
-                sel, warns = _pick_random(
-                    bin_pool, bdef.count, intra_form_used_ids,
-                    p.allow_partial_fill,
-                    f"[{bdef.low:.1f}-{bdef.high:.1f}]",
-                    form_number, self.question_usage,
-                    self.dcol, self.rng, p.allow_reuse, p.max_reuse,
-                )
-                sel["_form"] = form_number
-                form_parts.append(sel)
-                all_warnings.extend(warns)
-                if "QuestionID" in sel.columns:
-                    intra_form_used_ids.update(
-                        sel["QuestionID"].dropna().astype(str))
+                    sel, warns = _pick_random(
+                        bin_pool, bdef.count, intra_form_used_ids,
+                        p.allow_partial_fill,
+                        f"{domain} [{bdef.low:.1f}-{bdef.high:.1f}]",
+                        form_number, self.question_usage,
+                        self.dcol, self.rng, p.allow_reuse, p.max_reuse,
+                    )
+                    sel["_form"] = form_number
+                    form_parts.append(sel)
+                    all_warnings.extend(warns)
+                    if "QuestionID" in sel.columns:
+                        intra_form_used_ids.update(
+                            sel["QuestionID"].dropna().astype(str))
 
         form = pd.concat(form_parts, ignore_index=True) if form_parts else pd.DataFrame()
         # Drop helper columns before returning
