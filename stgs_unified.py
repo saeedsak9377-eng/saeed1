@@ -345,6 +345,102 @@ class AssemblyParams:
     rng_seed:           Optional[int] = None
 
 
+def _pick_weighted(pool: pd.DataFrame,
+                   count: int,
+                   used_ids_this_form: set,
+                   mean_target: float,
+                   sigma: float,
+                   allow_partial: bool,
+                   label: str,
+                   form_number: int,
+                   question_usage: dict,
+                   dcol: str,
+                   rng: np.random.Generator,
+                   allow_reuse: bool,
+                   max_reuse: int,
+                   ) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Select `count` items from `pool` using Gaussian-weighted sampling.
+
+    Items whose difficulty is close to `mean_target` receive higher
+    probability; items in the tails receive lower probability but are
+    NOT excluded — they will be sampled occasionally, producing a
+    bell-shaped distribution across the D-domain chart while EXACTLY
+    preserving the per-category count (MAR=5, MAL=1, …).
+
+    Uniqueness: same guarantees as _pick_random — never duplicate within
+    the same form, cross-form reuse capped at max_reuse.
+    """
+    qid_col = "QuestionID"
+    warnings: list[str] = []
+
+    # Remove already-used items this form
+    if used_ids_this_form and qid_col in pool.columns:
+        pool = pool[~pool[qid_col].astype(str).isin(used_ids_this_form)].copy()
+
+    if pool.empty:
+        if allow_partial:
+            placeholder = pd.DataFrame({
+                col: ([label] if col in ("Category","الناتج") else
+                      [None]  if col == dcol else
+                      ["*** No questions found ***"])
+                for col in pool.columns
+            } if not pool.empty else {dcol: [None]})
+            warnings.append(
+                f"Form {form_number}: no items available for '{label}'.")
+            return placeholder, warnings
+        return pd.DataFrame(), warnings
+
+    # Compute Gaussian weights
+    diffs   = pd.to_numeric(pool[dcol], errors="coerce").fillna(mean_target)
+    weights = np.exp(-0.5 * ((diffs.to_numpy() - mean_target) / sigma) ** 2)
+    weights = np.clip(weights, 1e-6, None)   # never zero — tail items included
+    weights = weights / weights.sum()
+
+    if len(pool) >= count:
+        idx = rng.choice(len(pool), size=count, replace=False, p=weights)
+        selected = pool.iloc[idx].copy()
+    elif allow_partial:
+        selected = pool.copy()
+        needed = count - len(selected)
+        placeholder = pd.DataFrame({
+            col: ([label] * needed if col in ("Category","الناتج") else
+                  [None]  * needed if col == dcol else
+                  ["*** No questions found ***"] * needed)
+            for col in pool.columns
+        })
+        selected = pd.concat([selected, placeholder], ignore_index=True)
+        warnings.append(
+            f"Form {form_number}: shortage of {needed} for '{label}' "
+            f"— placeholder rows added.")
+    else:
+        if allow_reuse and qid_col in pool.columns:
+            reuse_pool = pool[
+                pool[qid_col].astype(str).map(
+                    lambda q: question_usage.get(q, 0) < max_reuse)
+            ].copy()
+        else:
+            reuse_pool = pool.copy()
+        if len(reuse_pool) >= count:
+            diffs2   = pd.to_numeric(reuse_pool[dcol], errors="coerce").fillna(mean_target)
+            weights2 = np.exp(-0.5*((diffs2.to_numpy()-mean_target)/sigma)**2)
+            weights2 = np.clip(weights2, 1e-6, None)
+            weights2 = weights2 / weights2.sum()
+            idx = rng.choice(len(reuse_pool), size=count, replace=False, p=weights2)
+            selected = reuse_pool.iloc[idx].copy()
+        else:
+            selected = pd.DataFrame({
+                col: ([label] * count if col in ("Category","الناتج") else
+                      [None]  * count if col == dcol else
+                      ["*** Not enough questions ***"] * count)
+                for col in pool.columns
+            })
+            warnings.append(
+                f"Form {form_number}: not enough items for '{label}' "
+                f"— {count} placeholder rows added.")
+    return selected, warnings
+
+
 def _pick_random(pool: pd.DataFrame,
                  count: int,
                  used_ids_this_form: set,   # QuestionID strings already in this form
@@ -473,17 +569,31 @@ class AssemblyEngine:
         form_parts: list[pd.DataFrame] = []
         all_warnings: list[str] = []
 
-        use_manual = any(s.bins for s in p.slots)
         mean_t = (float(np.mean(p.diff_mean_range))
                   if p.diff_mean_range
                   else (p.diff_range[0] + p.diff_range[1]) / 2.0)
 
-        if use_manual:
-            # ── Per-slot mode: manual bins honoured exactly ───────────────────
-            for slot in p.slots:
-                pool = self._pool_for_slot(slot, intra_form_used_ids)
-                bins = slot.bins
-                for bdef in bins:
+        # ── Every slot picks EXACTLY its specified count ──────────────────────
+        # Category structure (MAR=5, MAL=1, MAN=2, …) is ALWAYS respected.
+        #
+        # Bell-curve distribution is achieved via WEIGHTED sampling:
+        #   - Each candidate item gets a Gaussian weight based on its difficulty
+        #   - Higher weight → more likely to be selected
+        #   - Items at the mean get the highest weight; tail items get lower but
+        #     non-zero weight, so they are still selected occasionally
+        #   - Because all slots in the same D domain share the same mean/sigma,
+        #     the combined domain chart naturally looks like a bell
+        #
+        # Manual bins (if set) override weighted sampling for that slot.
+
+        use_manual = any(s.bins for s in p.slots)
+
+        for slot in p.slots:
+            pool = self._pool_for_slot(slot, intra_form_used_ids)
+
+            if use_manual and slot.bins:
+                # ── Manual bins: draw exact counts from each bin range ────────
+                for bdef in slot.bins:
                     bin_pool = pool[
                         (pool[self.dcol] >= bdef.low) &
                         (pool[self.dcol] <  bdef.high)
@@ -503,65 +613,26 @@ class AssemblyEngine:
                     if "QuestionID" in sel.columns:
                         intra_form_used_ids.update(
                             sel["QuestionID"].dropna().astype(str))
-        else:
-            # ── D-domain bell-curve mode ──────────────────────────────────────
-            # Group slots by their D value in the bank, then apply ONE bell
-            # curve per D domain.  This is exactly what the original
-            # add_subdomain_chart() was showing: one distribution per domain.
-            #
-            # Step 1: find the D value for every slot by peeking at the bank.
-            domain_col = "D" if "D" in self.bank.columns else "المجال"
-            slot_domains: dict[str, list] = {}   # domain → [slot, ...]
-            for slot in p.slots:
-                # Build the slot pool to discover which D value its items have
-                sp = self._pool_for_slot(slot, intra_form_used_ids)
-                if not sp.empty and domain_col in sp.columns:
-                    dom = str(sp[domain_col].mode().iloc[0])
-                else:
-                    dom = "__all__"
-                slot_domains.setdefault(dom, []).append(slot)
+            else:
+                # ── Bell-curve weighted sampling ──────────────────────────────
+                # Assign a Gaussian weight to every candidate based on difficulty
+                lo, hi = p.diff_range
+                span   = hi - lo
+                sigma  = max(span / 3.3, 0.06)
 
-            # Step 2: for each domain, build combined pool + apply bell curve
-            for domain, domain_slots in slot_domains.items():
-                domain_count = sum(s.count for s in domain_slots)
-                domain_bins  = _auto_bins(domain_count, p.diff_range, mean_t)
-
-                # Combined pool of all slots that belong to this domain
-                domain_parts = []
-                for slot in domain_slots:
-                    sp = self._pool_for_slot(slot, intra_form_used_ids)
-                    domain_parts.append(sp)
-                domain_pool = pd.concat(domain_parts, ignore_index=True) \
-                              if domain_parts else pd.DataFrame()
-
-                for bdef in domain_bins:
-                    if domain_pool.empty:
-                        break
-                    bin_pool = domain_pool[
-                        (domain_pool[self.dcol] >= bdef.low) &
-                        (domain_pool[self.dcol] <  bdef.high) &
-                        (~domain_pool["QuestionID"].astype(str)
-                          .isin(intra_form_used_ids))
-                    ].copy()
-                    if bin_pool.empty:
-                        bin_pool = domain_pool[
-                            ~domain_pool["QuestionID"].astype(str)
-                             .isin(intra_form_used_ids)
-                        ].copy()
-
-                    sel, warns = _pick_random(
-                        bin_pool, bdef.count, intra_form_used_ids,
-                        p.allow_partial_fill,
-                        f"{domain} [{bdef.low:.1f}-{bdef.high:.1f}]",
-                        form_number, self.question_usage,
-                        self.dcol, self.rng, p.allow_reuse, p.max_reuse,
-                    )
-                    sel["_form"] = form_number
-                    form_parts.append(sel)
-                    all_warnings.extend(warns)
-                    if "QuestionID" in sel.columns:
-                        intra_form_used_ids.update(
-                            sel["QuestionID"].dropna().astype(str))
+                sel, warns = _pick_weighted(
+                    pool, slot.count, intra_form_used_ids,
+                    mean_t, sigma,
+                    p.allow_partial_fill, slot.label, form_number,
+                    self.question_usage, self.dcol, self.rng,
+                    p.allow_reuse, p.max_reuse,
+                )
+                sel["_form"] = form_number
+                form_parts.append(sel)
+                all_warnings.extend(warns)
+                if "QuestionID" in sel.columns:
+                    intra_form_used_ids.update(
+                        sel["QuestionID"].dropna().astype(str))
 
         form = pd.concat(form_parts, ignore_index=True) if form_parts else pd.DataFrame()
         # Drop helper columns before returning
