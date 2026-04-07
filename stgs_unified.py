@@ -851,17 +851,24 @@ class AssemblyEngine:
         """
         Build the candidate pool for a slot.
 
-        Cross-form exclusion uses adaptive relaxation:
-          Stage 1: exclude all previously used questions (strict)
-          Stage 2: if pool too small, allow questions used < max_reuse times
-          Stage 3: if still too small, allow any question not in THIS form
-        This prevents empty-pool crashes for narrow difficulty ranges (E, M, D)
-        when assembling many forms from a small bank.
+        Reuse-as-last-resort policy
+        ----------------------------
+        Reuse (questions that appeared in a previous form) is NEVER the first
+        choice — regardless of whether the 'Allow reuse' checkbox is ticked.
+
+        Priority order:
+          1. Fresh questions (never used in any form)          ← always tried first
+          2. Once-used questions (only when allow_reuse=True
+             AND fresh pool is too small)                      ← last resort
+          3. Least-used first (sorted by use count ascending)  ← ordering for (2)
+
+        Questions already placed in THIS form are always excluded (hard rule).
+        Questions used >= max_reuse times are always excluded (hard cap).
         """
         p    = self.params
         pool = self.bank.copy()
 
-        # Apply slot column filters
+        # Apply slot column filters (Category / الناتج / المؤشر)
         for col, val in slot.filters.items():
             if col in pool.columns and val not in (None, "", "nan"):
                 pool = pool[pool[col].astype(str) == str(val)]
@@ -875,36 +882,45 @@ class AssemblyEngine:
         lo, hi = p.diff_range
         pool = pool[(pool[self.dcol] >= lo) & (pool[self.dcol] <= hi)]
 
-        # Remove questions already placed in THIS form (hard rule, never relaxed)
+        # Hard cap: always exclude questions used >= max_reuse times
+        if "QuestionID" in pool.columns:
+            hard_cap = {q for q, c in self.question_usage.items()
+                        if c >= p.max_reuse}
+            pool = pool[~pool["QuestionID"].astype(str).isin(hard_cap)]
+
+        # Hard rule: never duplicate within the current form
         if intra_form_used_ids and "QuestionID" in pool.columns:
             pool = pool[~pool["QuestionID"].astype(str).isin(intra_form_used_ids)]
 
         if pool.empty:
             return pool.reset_index(drop=True)
 
-        # --- Adaptive cross-form exclusion -----------------------------------
-        # Stage 1: strict — exclude everything used before
-        if not p.allow_reuse:
-            used_once = {q for q, c in self.question_usage.items() if c >= 1}
-        else:
-            used_once = {q for q, c in self.question_usage.items()
-                         if c >= p.max_reuse}
-
-        strict_pool = pool[~pool["QuestionID"].astype(str).isin(used_once)] \
-            if "QuestionID" in pool.columns else pool
-
-        # If strict pool can fill the slot → use it
-        if len(strict_pool) >= slot.count:
-            return strict_pool.reset_index(drop=True)
-
-        # Stage 2: relax to least-used (sort by usage count ascending)
+        # ── Priority 1: FRESH questions (used in 0 previous forms) ────────────
+        fresh_ids = {q for q, c in self.question_usage.items() if c >= 1}
         if "QuestionID" in pool.columns:
-            pool = pool.copy()
+            fresh_pool = pool[~pool["QuestionID"].astype(str).isin(fresh_ids)]
+        else:
+            fresh_pool = pool.copy()
+
+        if len(fresh_pool) >= slot.count:
+            # Enough fresh questions — return fresh only
+            return fresh_pool.reset_index(drop=True)
+
+        # ── Priority 2: Allow reuse only if checkbox is ON and fresh exhausted ─
+        if not p.allow_reuse:
+            # Reuse not permitted — return whatever fresh questions exist
+            # (shortfall will be handled by placeholder logic upstream)
+            return fresh_pool.reset_index(drop=True)
+
+        # Reuse IS allowed but only as last resort:
+        # Return the full pool sorted by usage count ascending
+        # (fresh first, then least-used, then more-used)
+        pool = pool.copy()
+        if "QuestionID" in pool.columns:
             pool["_usage"] = pool["QuestionID"].astype(str).map(
                 lambda q: self.question_usage.get(q, 0))
             pool = pool.sort_values("_usage").drop(columns=["_usage"])
 
-        # Stage 3: return the full filtered pool (excluding only this-form dupes)
         return pool.reset_index(drop=True)
 
 
