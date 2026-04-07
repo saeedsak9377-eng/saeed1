@@ -345,6 +345,135 @@ class AssemblyParams:
     rng_seed:           Optional[int] = None
 
 
+def _pick_stratified_with_quota(
+        pool: pd.DataFrame,
+        total_count: int,
+        used_ids_this_form: set,
+        quota: dict,           # cat_label → max items allowed from that category
+        cat_col: str,          # column in pool containing the category label
+        diff_range: tuple,
+        mean_target: float,
+        sigma: float,
+        allow_partial: bool,
+        domain_label: str,
+        form_number: int,
+        question_usage: dict,
+        dcol: str,
+        rng: np.random.Generator,
+        allow_reuse: bool,
+        max_reuse: int,
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Quantile-stratified sampling on the COMBINED D-domain pool while
+    respecting hard per-category quotas.
+
+    Algorithm
+    ---------
+    1. Remove already-used items (this form) and over-used items (cross-form).
+    2. Sort remaining items by difficulty.
+    3. Compute Gaussian CDF for each item.
+    4. Walk through `total_count` equal CDF stripes from left to right.
+    5. In each stripe, pick the best available item that still has quota.
+       - If the stripe's best candidate has exhausted its category quota,
+         try the next-closest item in the stripe.
+       - If the whole stripe is exhausted by quota limits, borrow from
+         the nearest available item in any adjacent stripe.
+    6. Result: the domain-level distribution is a bell curve AND each
+       category count is exactly respected.
+    """
+    import math
+    qid_col  = "QuestionID"
+    warnings: list[str] = []
+
+    # Remove already-used and over-used items
+    if used_ids_this_form and qid_col in pool.columns:
+        pool = pool[~pool[qid_col].astype(str).isin(used_ids_this_form)].copy()
+    if not allow_reuse and qid_col in pool.columns:
+        overused = {q for q, c in question_usage.items() if c >= 1}
+        pool = pool[~pool[qid_col].astype(str).isin(overused)].copy()
+    elif allow_reuse and qid_col in pool.columns:
+        overused = {q for q, c in question_usage.items() if c >= max_reuse}
+        pool = pool[~pool[qid_col].astype(str).isin(overused)].copy()
+
+    if pool.empty or total_count == 0:
+        return pd.DataFrame(), warnings
+
+    # Sort by difficulty
+    diffs  = pd.to_numeric(pool[dcol], errors="coerce").fillna(mean_target)
+    order  = np.argsort(diffs.to_numpy())
+    sorted_pool  = pool.iloc[order].reset_index(drop=True)
+    sorted_diffs = diffs.to_numpy()[order]
+
+    # Gaussian CDF per item
+    cdf_vals = np.array([
+        0.5 * (1.0 + math.erf((d - mean_target) / (sigma * math.sqrt(2))))
+        for d in sorted_diffs
+    ])
+
+    # Remaining quota per category (mutable copy)
+    remaining_quota = dict(quota)
+    chosen_positions: list[int] = []   # indices into sorted_pool
+
+    stripe_w = 1.0 / total_count
+
+    for k in range(total_count):
+        lo_cdf     = k * stripe_w
+        hi_cdf     = (k + 1) * stripe_w
+        target_cdf = lo_cdf + rng.random() * stripe_w   # jittered target
+
+        # Build candidate set: in-stripe, not yet chosen, still has quota
+        def _available(idx_set):
+            """Filter indices to those not yet chosen and with quota."""
+            result = []
+            for i in idx_set:
+                if i in chosen_positions:
+                    continue
+                cat = str(sorted_pool.at[i, cat_col]) if cat_col in sorted_pool.columns else "__"
+                if remaining_quota.get(cat, 0) > 0:
+                    result.append(i)
+            return result
+
+        stripe_mask = np.where((cdf_vals >= lo_cdf) & (cdf_vals < hi_cdf))[0]
+        candidates  = _available(stripe_mask)
+
+        if not candidates:
+            # Stripe exhausted by quota — expand search radius outward
+            all_remaining = _available(range(len(sorted_pool)))
+            if not all_remaining:
+                break   # pool truly exhausted
+            # Pick the item with CDF closest to stripe midpoint
+            mid_cdf    = (lo_cdf + hi_cdf) / 2.0
+            candidates = sorted(all_remaining,
+                                 key=lambda i: abs(cdf_vals[i] - mid_cdf))
+
+        # Among candidates, pick closest CDF to jittered target
+        best = min(candidates, key=lambda i: abs(cdf_vals[i] - target_cdf))
+        chosen_positions.append(best)
+
+        # Decrement category quota
+        cat = str(sorted_pool.at[best, cat_col]) if cat_col in sorted_pool.columns else "__"
+        if cat in remaining_quota:
+            remaining_quota[cat] -= 1
+
+    selected = sorted_pool.iloc[chosen_positions].copy()
+
+    # Pad with placeholders if we couldn't fill all stripes
+    got = len(selected)
+    if got < total_count:
+        if allow_partial:
+            needed = total_count - got
+            placeholder = pd.DataFrame({
+                col: [None if col == dcol else f"*** shortage for {domain_label} ***"] * needed
+                for col in pool.columns
+            })
+            selected = pd.concat([selected, placeholder], ignore_index=True)
+            warnings.append(
+                f"Form {form_number}: domain '{domain_label}' short by {needed} — "
+                f"placeholders added.")
+
+    return selected, warnings
+
+
 def _gaussian_cdf(x: np.ndarray, mean: float, sigma: float) -> np.ndarray:
     """Gaussian CDF using the error function (no scipy needed)."""
     return 0.5 * (1.0 + np.array(
@@ -622,27 +751,14 @@ class AssemblyEngine:
         mean_t = (float(np.mean(p.diff_mean_range))
                   if p.diff_mean_range
                   else (p.diff_range[0] + p.diff_range[1]) / 2.0)
-
-        # ── Every slot picks EXACTLY its specified count ──────────────────────
-        # Category structure (MAR=5, MAL=1, MAN=2, …) is ALWAYS respected.
-        #
-        # Bell-curve distribution is achieved via WEIGHTED sampling:
-        #   - Each candidate item gets a Gaussian weight based on its difficulty
-        #   - Higher weight → more likely to be selected
-        #   - Items at the mean get the highest weight; tail items get lower but
-        #     non-zero weight, so they are still selected occasionally
-        #   - Because all slots in the same D domain share the same mean/sigma,
-        #     the combined domain chart naturally looks like a bell
-        #
-        # Manual bins (if set) override weighted sampling for that slot.
-
+        lo, hi = p.diff_range
+        sigma  = max((hi - lo) / 3.3, 0.06)
         use_manual = any(s.bins for s in p.slots)
 
-        for slot in p.slots:
-            pool = self._pool_for_slot(slot, intra_form_used_ids)
-
-            if use_manual and slot.bins:
-                # ── Manual bins: draw exact counts from each bin range ────────
+        if use_manual:
+            # ── Manual bins: per-slot, draw from each bin range exactly ──────
+            for slot in p.slots:
+                pool = self._pool_for_slot(slot, intra_form_used_ids)
                 for bdef in slot.bins:
                     bin_pool = pool[
                         (pool[self.dcol] >= bdef.low) &
@@ -663,16 +779,64 @@ class AssemblyEngine:
                     if "QuestionID" in sel.columns:
                         intra_form_used_ids.update(
                             sel["QuestionID"].dropna().astype(str))
-            else:
-                # ── Quantile-stratified Gaussian sampling ─────────────────────
-                lo, hi = p.diff_range
-                span   = hi - lo
-                sigma  = max(span / 3.3, 0.06)
+        else:
+            # ── D-domain stratified bell sampling ─────────────────────────────
+            #
+            # The bell curve belongs to the D domain as a whole:
+            #   • Group all slots by their D value
+            #   • Build ONE combined D-pool (all categories in that domain)
+            #   • Apply quantile-stratified sampling on the combined pool
+            #     for the total domain question count
+            #   • Hard per-category quotas (MAR≤5, MAL≤1, …) are enforced
+            #     during item selection so exact counts are always met
+            #
+            domain_col = "D" if "D" in self.bank.columns else "المجال"
 
-                sel, warns = _pick_stratified(
-                    pool, slot.count, intra_form_used_ids,
+            # --- Step 1: discover D value for each slot ----------------------
+            slot_to_domain: dict[str, str] = {}
+            for slot in p.slots:
+                sp = self._pool_for_slot(slot, intra_form_used_ids)
+                if not sp.empty and domain_col in sp.columns:
+                    dom = str(sp[domain_col].mode().iloc[0])
+                else:
+                    dom = "__no_domain__"
+                slot_to_domain[slot.label] = dom
+
+            # --- Step 2: group slots by domain --------------------------------
+            domain_to_slots: dict[str, list] = {}
+            for slot in p.slots:
+                d = slot_to_domain[slot.label]
+                domain_to_slots.setdefault(d, []).append(slot)
+
+            # --- Step 3: for each domain apply one stratified bell curve ------
+            for domain, d_slots in domain_to_slots.items():
+
+                # Remaining quota per category (starts at the target count)
+                quota: dict[str, int] = {s.label: s.count for s in d_slots}
+
+                # Combined pool for this domain: all categories merged
+                d_pools = []
+                for slot in d_slots:
+                    sp = self._pool_for_slot(slot, intra_form_used_ids)
+                    sp = sp.copy()
+                    sp["_cat_label"] = slot.label
+                    d_pools.append(sp)
+                d_pool = pd.concat(d_pools, ignore_index=True) \
+                         if d_pools else pd.DataFrame()
+
+                if d_pool.empty:
+                    continue
+
+                # Total items needed from this domain
+                total_needed = sum(quota.values())
+
+                # Apply stratified sampling on the combined D pool,
+                # honouring per-category hard caps
+                sel, warns = _pick_stratified_with_quota(
+                    d_pool, total_needed, intra_form_used_ids,
+                    quota, "_cat_label",
                     p.diff_range, mean_t, sigma,
-                    p.allow_partial_fill, slot.label, form_number,
+                    p.allow_partial_fill, domain, form_number,
                     self.question_usage, self.dcol, self.rng,
                     p.allow_reuse, p.max_reuse,
                 )
