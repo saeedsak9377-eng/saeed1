@@ -462,8 +462,9 @@ def _pick_stratified_with_quota(
     if got < total_count:
         if allow_partial:
             needed = total_count - got
+            # Use None for ALL columns so numeric operations never crash
             placeholder = pd.DataFrame({
-                col: [None if col == dcol else f"*** shortage for {domain_label} ***"] * needed
+                col: [None] * needed
                 for col in pool.columns
             })
             selected = pd.concat([selected, placeholder], ignore_index=True)
@@ -531,12 +532,8 @@ def _pick_stratified(pool: pd.DataFrame,
 
     # --- Handle exhausted / too-small pool -----------------------------------
     def _placeholders(n, cols):
-        return pd.DataFrame({
-            col: ([label] * n if col in ("Category","الناتج") else
-                  [None]  * n if col == dcol else
-                  ["*** No questions found ***"] * n)
-            for col in cols
-        })
+        # All columns get None — prevents numeric/string crashes downstream
+        return pd.DataFrame({col: [None] * n for col in cols})
 
     if pool.empty or count == 0:
         if count > 0 and allow_partial:
@@ -658,12 +655,9 @@ def _pick_random(pool: pd.DataFrame,
         selected = pool.copy()
         needed = count - len(selected)
         if needed > 0:
-            placeholder = pd.DataFrame({
-                col: ([label] * needed if col in ("Category", "الناتج") else
-                      [None]  * needed if col == dcol else
-                      ["*** No questions found ***"] * needed)
-                for col in pool.columns
-            })
+            # All None — never put strings in numeric columns
+            placeholder = pd.DataFrame(
+                {col: [None] * needed for col in pool.columns})
             selected = pd.concat([selected, placeholder], ignore_index=True)
             warnings.append(
                 f"Form {form_number}: shortage of {needed} for '{label}' "
@@ -683,12 +677,9 @@ def _pick_random(pool: pd.DataFrame,
             idx = rng.choice(len(reuse_pool), size=count, replace=False)
             selected = reuse_pool.iloc[idx].copy()
         else:
-            selected = pd.DataFrame({
-                col: ([label] * count if col in ("Category", "الناتج") else
-                      [None]  * count if col == dcol else
-                      ["*** Not enough questions ***"] * count)
-                for col in pool.columns
-            })
+            # All None — never put strings in numeric columns
+            selected = pd.DataFrame(
+                {col: [None] * count for col in pool.columns})
             warnings.append(
                 f"Form {form_number}: not enough items for '{label}' "
                 f"— {count} placeholder rows added.")
@@ -857,30 +848,23 @@ class AssemblyEngine:
     # ── helpers ───────────────────────────────────────────────────────────────
     def _pool_for_slot(self, slot: SlotDef,
                        intra_form_used_ids: set[str]) -> pd.DataFrame:
-        p   = self.params
+        """
+        Build the candidate pool for a slot.
+
+        Cross-form exclusion uses adaptive relaxation:
+          Stage 1: exclude all previously used questions (strict)
+          Stage 2: if pool too small, allow questions used < max_reuse times
+          Stage 3: if still too small, allow any question not in THIS form
+        This prevents empty-pool crashes for narrow difficulty ranges (E, M, D)
+        when assembling many forms from a small bank.
+        """
+        p    = self.params
         pool = self.bank.copy()
 
-        # Apply slot column filters (Category / الناتج / المؤشر)
+        # Apply slot column filters
         for col, val in slot.filters.items():
             if col in pool.columns and val not in (None, "", "nan"):
                 pool = pool[pool[col].astype(str) == str(val)]
-
-        # Remove questions already in this form (by QuestionID)
-        if intra_form_used_ids and "QuestionID" in pool.columns:
-            pool = pool[~pool["QuestionID"].astype(str).isin(intra_form_used_ids)]
-
-        # Cross-form exclusion
-        if not p.allow_reuse:
-            # Exclude every question used in any previous form
-            overused = {q for q, c in self.question_usage.items() if c >= 1}
-            if "QuestionID" in pool.columns:
-                pool = pool[~pool["QuestionID"].astype(str).isin(overused)]
-        else:
-            # Allow reuse but cap at max_reuse forms
-            overused = {q for q, c in self.question_usage.items()
-                        if c >= p.max_reuse}
-            if "QuestionID" in pool.columns:
-                pool = pool[~pool["QuestionID"].astype(str).isin(overused)]
 
         # Discrimination filter
         disc_col = "Discrimination" if "Discrimination" in pool.columns else "تمييز"
@@ -891,6 +875,36 @@ class AssemblyEngine:
         lo, hi = p.diff_range
         pool = pool[(pool[self.dcol] >= lo) & (pool[self.dcol] <= hi)]
 
+        # Remove questions already placed in THIS form (hard rule, never relaxed)
+        if intra_form_used_ids and "QuestionID" in pool.columns:
+            pool = pool[~pool["QuestionID"].astype(str).isin(intra_form_used_ids)]
+
+        if pool.empty:
+            return pool.reset_index(drop=True)
+
+        # --- Adaptive cross-form exclusion -----------------------------------
+        # Stage 1: strict — exclude everything used before
+        if not p.allow_reuse:
+            used_once = {q for q, c in self.question_usage.items() if c >= 1}
+        else:
+            used_once = {q for q, c in self.question_usage.items()
+                         if c >= p.max_reuse}
+
+        strict_pool = pool[~pool["QuestionID"].astype(str).isin(used_once)] \
+            if "QuestionID" in pool.columns else pool
+
+        # If strict pool can fill the slot → use it
+        if len(strict_pool) >= slot.count:
+            return strict_pool.reset_index(drop=True)
+
+        # Stage 2: relax to least-used (sort by usage count ascending)
+        if "QuestionID" in pool.columns:
+            pool = pool.copy()
+            pool["_usage"] = pool["QuestionID"].astype(str).map(
+                lambda q: self.question_usage.get(q, 0))
+            pool = pool.sort_values("_usage").drop(columns=["_usage"])
+
+        # Stage 3: return the full filtered pool (excluding only this-form dupes)
         return pool.reset_index(drop=True)
 
 
