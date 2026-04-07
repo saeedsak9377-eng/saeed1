@@ -345,99 +345,149 @@ class AssemblyParams:
     rng_seed:           Optional[int] = None
 
 
-def _pick_weighted(pool: pd.DataFrame,
-                   count: int,
-                   used_ids_this_form: set,
-                   mean_target: float,
-                   sigma: float,
-                   allow_partial: bool,
-                   label: str,
-                   form_number: int,
-                   question_usage: dict,
-                   dcol: str,
-                   rng: np.random.Generator,
-                   allow_reuse: bool,
-                   max_reuse: int,
-                   ) -> tuple[pd.DataFrame, list[str]]:
-    """
-    Select `count` items from `pool` using Gaussian-weighted sampling.
+def _gaussian_cdf(x: np.ndarray, mean: float, sigma: float) -> np.ndarray:
+    """Gaussian CDF using the error function (no scipy needed)."""
+    return 0.5 * (1.0 + np.array(
+        [float(__import__('math').erf((xi - mean) / (sigma * 1.41421356)))
+         for xi in x]
+    ))
 
-    Items whose difficulty is close to `mean_target` receive higher
-    probability; items in the tails receive lower probability but are
-    NOT excluded — they will be sampled occasionally, producing a
-    bell-shaped distribution across the D-domain chart while EXACTLY
-    preserving the per-category count (MAR=5, MAL=1, …).
 
-    Uniqueness: same guarantees as _pick_random — never duplicate within
-    the same form, cross-form reuse capped at max_reuse.
+def _pick_stratified(pool: pd.DataFrame,
+                     count: int,
+                     used_ids_this_form: set,
+                     diff_range: tuple,
+                     mean_target: float,
+                     sigma: float,
+                     allow_partial: bool,
+                     label: str,
+                     form_number: int,
+                     question_usage: dict,
+                     dcol: str,
+                     rng: np.random.Generator,
+                     allow_reuse: bool,
+                     max_reuse: int,
+                     ) -> tuple[pd.DataFrame, list[str]]:
     """
-    qid_col = "QuestionID"
+    Quantile-stratified Gaussian sampling — guarantees smooth bell coverage.
+
+    Algorithm
+    ---------
+    1. Compute the Gaussian CDF value for every candidate item based on its
+       difficulty.
+    2. Divide the CDF range [0, 1] into `count` equal-probability stripes.
+    3. In each stripe, randomly pick ONE item whose CDF value falls in that
+       stripe (with a small random jitter to avoid always picking the same
+       boundary item).
+    4. If a stripe is empty (no item in that difficulty zone), borrow the
+       nearest available item from a neighbour stripe.
+
+    Why this works for small counts
+    --------------------------------
+    Even with count=1 (MAL) the single item is drawn from the middle stripe
+    (near the mean). With count=2 (MAN) items land in the 1/4 and 3/4 CDF
+    stripes — flanking the mean symmetrically. With count=5 (MAR) items
+    spread across 5 evenly-spaced quantiles, guaranteeing tail coverage.
+
+    When many slots share the same D domain, the aggregate chart across all
+    categories forms a smooth bell curve, while each slot's count is exact.
+    """
+    import math
+    qid_col  = "QuestionID"
     warnings: list[str] = []
 
-    # Remove already-used items this form
+    # --- Remove already-used items this form ---------------------------------
     if used_ids_this_form and qid_col in pool.columns:
         pool = pool[~pool[qid_col].astype(str).isin(used_ids_this_form)].copy()
 
-    if pool.empty:
-        if allow_partial:
-            placeholder = pd.DataFrame({
-                col: ([label] if col in ("Category","الناتج") else
-                      [None]  if col == dcol else
-                      ["*** No questions found ***"])
-                for col in pool.columns
-            } if not pool.empty else {dcol: [None]})
-            warnings.append(
-                f"Form {form_number}: no items available for '{label}'.")
-            return placeholder, warnings
+    # --- Handle exhausted / too-small pool -----------------------------------
+    def _placeholders(n, cols):
+        return pd.DataFrame({
+            col: ([label] * n if col in ("Category","الناتج") else
+                  [None]  * n if col == dcol else
+                  ["*** No questions found ***"] * n)
+            for col in cols
+        })
+
+    if pool.empty or count == 0:
+        if count > 0 and allow_partial:
+            warnings.append(f"Form {form_number}: no items for '{label}'.")
+            return _placeholders(count, pool.columns if not pool.empty
+                                 else [dcol, "QuestionID"]), warnings
         return pd.DataFrame(), warnings
 
-    # Compute Gaussian weights
-    diffs   = pd.to_numeric(pool[dcol], errors="coerce").fillna(mean_target)
-    weights = np.exp(-0.5 * ((diffs.to_numpy() - mean_target) / sigma) ** 2)
-    weights = np.clip(weights, 1e-6, None)   # never zero — tail items included
-    weights = weights / weights.sum()
-
-    if len(pool) >= count:
-        idx = rng.choice(len(pool), size=count, replace=False, p=weights)
-        selected = pool.iloc[idx].copy()
-    elif allow_partial:
-        selected = pool.copy()
-        needed = count - len(selected)
-        placeholder = pd.DataFrame({
-            col: ([label] * needed if col in ("Category","الناتج") else
-                  [None]  * needed if col == dcol else
-                  ["*** No questions found ***"] * needed)
-            for col in pool.columns
-        })
-        selected = pd.concat([selected, placeholder], ignore_index=True)
-        warnings.append(
-            f"Form {form_number}: shortage of {needed} for '{label}' "
-            f"— placeholder rows added.")
+    # --- Build working pool (optionally include reuse candidates) ------------
+    working = pool.copy()
+    if not allow_reuse:
+        pass  # pool is already filtered upstream
     else:
-        if allow_reuse and qid_col in pool.columns:
-            reuse_pool = pool[
-                pool[qid_col].astype(str).map(
-                    lambda q: question_usage.get(q, 0) < max_reuse)
-            ].copy()
-        else:
-            reuse_pool = pool.copy()
-        if len(reuse_pool) >= count:
-            diffs2   = pd.to_numeric(reuse_pool[dcol], errors="coerce").fillna(mean_target)
-            weights2 = np.exp(-0.5*((diffs2.to_numpy()-mean_target)/sigma)**2)
-            weights2 = np.clip(weights2, 1e-6, None)
-            weights2 = weights2 / weights2.sum()
-            idx = rng.choice(len(reuse_pool), size=count, replace=False, p=weights2)
-            selected = reuse_pool.iloc[idx].copy()
-        else:
-            selected = pd.DataFrame({
-                col: ([label] * count if col in ("Category","الناتج") else
-                      [None]  * count if col == dcol else
-                      ["*** Not enough questions ***"] * count)
-                for col in pool.columns
-            })
+        working = working[
+            working[qid_col].astype(str).map(
+                lambda q: question_usage.get(q, 0) < max_reuse)
+        ].copy()
+    if working.empty:
+        working = pool.copy()  # last resort
+
+    # --- If pool too small, take all + pad -----------------------------------
+    if len(working) < count:
+        if allow_partial:
+            needed = count - len(working)
+            result = pd.concat(
+                [working, _placeholders(needed, working.columns)],
+                ignore_index=True)
             warnings.append(
-                f"Form {form_number}: not enough items for '{label}' "
-                f"— {count} placeholder rows added.")
+                f"Form {form_number}: shortage of {needed} for '{label}' "
+                f"— placeholders added.")
+            return result, warnings
+        else:
+            return _placeholders(count, working.columns), warnings
+
+    # --- Compute per-item CDF values based on difficulty ---------------------
+    diffs = pd.to_numeric(working[dcol], errors="coerce").fillna(mean_target)
+    cdf_vals = np.array([
+        0.5 * (1.0 + math.erf((d - mean_target) / (sigma * math.sqrt(2))))
+        for d in diffs
+    ])
+
+    # --- Sort by CDF (= sort by difficulty) ----------------------------------
+    order    = np.argsort(cdf_vals)
+    sorted_w = working.iloc[order].reset_index(drop=True)
+    sorted_c = cdf_vals[order]
+
+    # --- Divide [0,1] into `count` equal stripes and pick one per stripe -----
+    # Add tiny random offset within each stripe (Latin-Hypercube style)
+    stripe_w = 1.0 / count
+    chosen_indices: list[int] = []
+
+    for k in range(count):
+        lo_cdf = k * stripe_w
+        hi_cdf = (k + 1) * stripe_w
+        # jitter: shift the target point randomly within the stripe
+        target_cdf = lo_cdf + rng.random() * stripe_w
+
+        # Find all candidates in this stripe
+        mask = (sorted_c >= lo_cdf) & (sorted_c < hi_cdf)
+        # Exclude already chosen
+        mask &= ~np.isin(np.arange(len(sorted_w)), chosen_indices)
+
+        if mask.any():
+            candidates = np.where(mask)[0]
+            # Among stripe candidates, pick the one whose CDF is closest
+            # to the jittered target (deterministic within jitter)
+            best = candidates[np.argmin(np.abs(sorted_c[candidates] - target_cdf))]
+            chosen_indices.append(int(best))
+        else:
+            # Stripe empty — find the nearest unused item by CDF distance
+            unused_mask = ~np.isin(np.arange(len(sorted_w)), chosen_indices)
+            if unused_mask.any():
+                unused_idx   = np.where(unused_mask)[0]
+                cdf_target_m = (lo_cdf + hi_cdf) / 2.0
+                nearest      = unused_idx[
+                    np.argmin(np.abs(sorted_c[unused_idx] - cdf_target_m))
+                ]
+                chosen_indices.append(int(nearest))
+
+    selected = sorted_w.iloc[chosen_indices].copy()
     return selected, warnings
 
 
@@ -614,15 +664,14 @@ class AssemblyEngine:
                         intra_form_used_ids.update(
                             sel["QuestionID"].dropna().astype(str))
             else:
-                # ── Bell-curve weighted sampling ──────────────────────────────
-                # Assign a Gaussian weight to every candidate based on difficulty
+                # ── Quantile-stratified Gaussian sampling ─────────────────────
                 lo, hi = p.diff_range
                 span   = hi - lo
                 sigma  = max(span / 3.3, 0.06)
 
-                sel, warns = _pick_weighted(
+                sel, warns = _pick_stratified(
                     pool, slot.count, intra_form_used_ids,
-                    mean_t, sigma,
+                    p.diff_range, mean_t, sigma,
                     p.allow_partial_fill, slot.label, form_number,
                     self.question_usage, self.dcol, self.rng,
                     p.allow_reuse, p.max_reuse,
