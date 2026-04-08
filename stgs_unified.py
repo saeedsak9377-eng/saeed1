@@ -1147,33 +1147,44 @@ def _write_domain_chart(wb, ws, domain_df: pd.DataFrame, dcol: str,
 
 
 def _embed_3pl_charts(wb, ws, fa: FormAnalysis, img_row: int):
-    """Embed score histogram, average ICC, SEM charts into the worksheet."""
+    """
+    Embed 3PL charts into the worksheet.
+
+    Layout (all charts placed far right, starting at column U = index 20,
+    so they never overlap the item table or difficulty distribution charts
+    which occupy columns A-R):
+      Row img_row      col 20 : Score Distribution
+      Row img_row      col 27 : Average ICC
+      Row img_row + 20 col 20 : SEM
+    """
+    RIGHT_COL = 20   # column U — well clear of item table and domain charts
+
     # Score distribution
     fig, ax = plt.subplots(figsize=(5, 3))
-    ax.hist(fa.scores, bins=15, color="#2E75B6", edgecolor="white", alpha=0.88)
+    ax.hist(fa.scores, bins=15, color=ETEC_BLUE, edgecolor="white", alpha=0.88)
     ax.set(xlabel="Total Score", ylabel="Number of Students",
            title="Simulated Score Distribution")
     ax.grid(alpha=0.3, axis="y"); fig.tight_layout()
-    ws.insert_image(img_row, 0, "", {"image_data": _fig_bytes(fig)})
+    ws.insert_image(img_row, RIGHT_COL, "", {"image_data": _fig_bytes(fig)})
     plt.close(fig)
 
-    # Average ICC
+    # Average ICC — placed 7 columns to the right of Score chart
     avg_icc = fa.icc.mean(axis=1)
     fig, ax = plt.subplots(figsize=(5, 3))
-    ax.plot(fa.theta_grid, avg_icc, color="#ED7D31", lw=2)
+    ax.plot(fa.theta_grid, avg_icc, color=ETEC_TEAL, lw=2)
     ax.set(xlabel="Ability (θ)", ylabel="P(Correct)",
            title="Item Characteristic Curve (ICC)", xlim=(-3, 3), ylim=(0, 1.05))
     ax.grid(alpha=0.3); fig.tight_layout()
-    ws.insert_image(img_row, 7, "", {"image_data": _fig_bytes(fig)})
+    ws.insert_image(img_row, RIGHT_COL + 7, "", {"image_data": _fig_bytes(fig)})
     plt.close(fig)
 
-    # SEM
+    # SEM — below score chart
     fig, ax = plt.subplots(figsize=(5, 3))
-    ax.plot(fa.theta_grid, fa.sem, color="#70AD47", lw=2)
+    ax.plot(fa.theta_grid, fa.sem, color=ETEC_GREEN, lw=2)
     ax.set(xlabel="Ability (θ)", ylabel="SEM",
            title="Standard Error of Measurement (SEM)", xlim=(-3, 3))
     ax.grid(alpha=0.3); fig.tight_layout()
-    ws.insert_image(img_row + 20, 0, "", {"image_data": _fig_bytes(fig)})
+    ws.insert_image(img_row + 20, RIGHT_COL, "", {"image_data": _fig_bytes(fig)})
     plt.close(fig)
 
 
@@ -1187,6 +1198,24 @@ M2_EXPORT_COLS = [
     ("المؤشر", 22, False), ("المجال", 18, False),
     ("difficulty", 12, True), ("تمييز", 12, True), ("التخمين", 12, True),
 ]
+
+
+def _make_output_folder(base_dir: Path, exam_type: str, n_forms: int) -> Path:
+    """
+    Create and return a timestamped output folder:
+      <base_dir>/<exam_type> - <n_forms> Forms - YYYY-MM-DD - HH-MM-SS/
+
+    Characters illegal in folder names are stripped automatically.
+    """
+    import datetime, re
+    now       = datetime.datetime.now()
+    date_str  = now.strftime("%Y-%m-%d")
+    time_str  = now.strftime("%H-%M-%S")
+    safe_exam = re.sub(r'[\\/:*?"<>|]', "", str(exam_type)).strip()
+    folder_name = f"{safe_exam} - {n_forms} Forms - {date_str} - {time_str}"
+    out = base_dir / folder_name
+    out.mkdir(parents=True, exist_ok=True)
+    return out
 
 
 def write_forms_workbook(
@@ -1303,7 +1332,6 @@ def write_forms_workbook(
                            else (fmts["da2"] if ri % 2 else fmts["dat"]))
                     ws.write(tbl+1+ri, ci, str(val) if val is not None else "", fmt)
 
-        ws.freeze_panes(tbl + 1, 0)
         ws.autofilter(tbl, 0, tbl + len(df), len(export_cols) - 1)
 
         # ── Per-domain difficulty bar charts (replicates add_subdomain_chart) ──
@@ -1764,8 +1792,10 @@ class _BaseMode(tk.Toplevel):
         if self._on_close: self._on_close()
 
     def _open_folder(self):
-        if self.source_path:
-            d = str(self.source_path.parent)
+        # Prefer the last generated output folder; fall back to bank folder
+        d = str(getattr(self, "_last_out_dir", None) or
+                (self.source_path.parent if self.source_path else None))
+        if d:
             if sys.platform == "win32": subprocess.Popen(["explorer", d])
             elif sys.platform == "darwin": subprocess.Popen(["open", d])
             else: subprocess.Popen(["xdg-open", d])
@@ -2208,10 +2238,13 @@ class Mode1Window(_BaseMode):
                              f"Item Corr. = {fa.item_corr:.3f}")
 
             self._lg("Writing output files…")
-            base = self.source_path.parent; prefix = self.source_path.stem
-            fp = base / f"{prefix}_Forms.xlsx"
-            ap = base / f"{prefix}_3PL_Analysis.xlsx"
-            rp = base / f"{prefix}_Remaining_Questions.xlsx"
+            exam_type = self._exam_var.get()
+            out_dir   = _make_output_folder(
+                self.source_path.parent, exam_type, n)
+            self._last_out_dir = out_dir   # for Open Folder button
+            fp = out_dir / "Forms.xlsx"
+            ap = out_dir / "3PL_Analysis.xlsx"
+            rp = out_dir / "Remaining_Questions.xlsx"
 
             # Usage tracking: by QuestionID
             usage: dict[str, int] = {}
@@ -2237,9 +2270,10 @@ class Mode1Window(_BaseMode):
             remaining.to_excel(str(rp), index=False, engine="openpyxl")
 
             self._q.put(("prog", 100))
-            self._lg(f"\n  📄 Forms           : {fp}")
-            self._lg(f"  📊 3PL Analysis    : {ap}")
-            self._lg(f"  📋 Remaining Qs    : {rp}")
+            self._lg(f"\n  📁 Output folder   : {out_dir}")
+            self._lg(f"  📄 Forms           : {fp.name}")
+            self._lg(f"  📊 3PL Analysis    : {ap.name}")
+            self._lg(f"  📋 Remaining Qs    : {rp.name}")
             self._lg("\n✓ Generation complete!", "lime")
             self._q.put(("done", valid))
         except Exception as e:
@@ -2779,11 +2813,13 @@ class Mode2Window(_BaseMode):
                              f"Item Corr. = {fa.item_corr:.3f}")
 
             self._lg("Writing output files…")
-            base   = self.source_path.parent
-            prefix = self.source_path.stem
-            fp = base / f"{prefix}_Forms.xlsx"
-            ap = base / f"{prefix}_3PL_Analysis.xlsx"
-            rp = base / f"{prefix}_Remaining_Questions.xlsx"
+            exam_type = self._exam_var.get()
+            out_dir   = _make_output_folder(
+                self.source_path.parent, exam_type, n)
+            self._last_out_dir = out_dir
+            fp = out_dir / "Forms.xlsx"
+            ap = out_dir / "3PL_Analysis.xlsx"
+            rp = out_dir / "Remaining_Questions.xlsx"
 
             usage: dict[str, int] = {}
             for form, _, _ in results:
@@ -2807,9 +2843,10 @@ class Mode2Window(_BaseMode):
                            errors="ignore").to_excel(str(rp), index=False, engine="openpyxl")
 
             self._q.put(("prog", 100))
-            self._lg(f"\n  📄 Forms           : {fp}")
-            self._lg(f"  📊 3PL Analysis    : {ap}")
-            self._lg(f"  📋 Remaining Qs    : {rp}")
+            self._lg(f"\n  📁 Output folder   : {out_dir}")
+            self._lg(f"  📄 Forms           : {fp.name}")
+            self._lg(f"  📊 3PL Analysis    : {ap.name}")
+            self._lg(f"  📋 Remaining Qs    : {rp.name}")
             self._lg("\n✓ Generation complete!", "lime")
             self._q.put(("done", valid))
 
