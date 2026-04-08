@@ -1768,15 +1768,27 @@ class _BaseMode(tk.Toplevel):
                     _append_log(self._logbox, item[1], item[2] if len(item) > 2 else "")
                 elif k == "prog":
                     self._pv.set(item[1])
-                elif k == "done":
+                elif k in ("done", "done_m1", "done_m2"):
                     self.analyses = item[1]
                     self._gbtn.config(state="normal"); self._pv.set(100)
                     self._refresh_results()
                     self._nb.select(self._results_tab_idx)
                     self._sv.set("Generation complete.")
+                    # Update bank Option 2 label with fresh unused count
+                    if k in ("done_m1", "done_m2"):
+                        self._refresh_unused_label()
+                        if hasattr(self, "_update_stats_display"):
+                            self._update_stats_display()
+                        elif hasattr(self, "_refresh_from_df"):
+                            active = self._active_bank()
+                            if active is not None:
+                                self._refresh_from_df(active)
+                    unused_info = ""
+                    if len(item) > 2 and isinstance(item[2], int):
+                        unused_info = f"\n\nBank: {item[2]} unused questions remaining."
                     mb.showinfo("Done",
                                 "All forms generated and analysed.\n"
-                                "Output files saved to the same folder as the bank.")
+                                f"Output files saved in a timestamped folder.{unused_info}")
                 elif k == "fail":
                     self._gbtn.config(state="normal")
                     self._sv.set("Generation failed — see log.")
@@ -1825,6 +1837,9 @@ class Mode1Window(_BaseMode):
         self._q: queue.Queue = queue.Queue()
         self._sub_rows:  list[tuple[str, tk.Entry]] = []
         self._bins_map:  dict[str, list] = {}
+        # Cumulative set of QuestionIDs used across ALL generation runs this session
+        self._used_qids: set[str] = set()
+        self._bank_option = tk.IntVar(value=1)   # 1=full, 2=unused only
         self._build(); self.after(80, self._poll)
 
     # ── build ─────────────────────────────────────────────────────────────────
@@ -1884,20 +1899,91 @@ class Mode1Window(_BaseMode):
     def _build_bank_tab(self, p):
         p.configure(bg=BG_L, padx=20, pady=16)
         _lbl(p, "Question Bank", bold=True).pack(anchor="w", pady=(0, 6))
+
+        # Upload row
         uf = tk.Frame(p, bg=BG_L); uf.pack(fill="x", pady=4)
         self._bp = tk.StringVar(value="No file selected")
         tk.Label(uf, textvariable=self._bp, bg=BG_L, fg=BG_D,
                  font=FB, width=55, anchor="w").pack(side="left")
         _btn(uf, "Upload Excel / CSV", self._browse_bank,
              bg=self.COLOR).pack(side="left", padx=8)
+
+        # ── Bank source selector ─────────────────────────────────────────────
+        src_frm = tk.LabelFrame(p, text="Assembly Bank Source",
+                                bg=BG_L, fg=BG_D, font=FH, padx=10, pady=8)
+        src_frm.pack(fill="x", pady=(8, 4))
+
+        tk.Radiobutton(src_frm,
+                       text="Option 1 — Use full uploaded bank  (all questions)",
+                       variable=self._bank_option, value=1,
+                       bg=BG_L, fg=TXD, font=FB,
+                       activebackground=BG_L,
+                       command=self._on_bank_option).pack(anchor="w")
+
+        opt2_frm = tk.Frame(src_frm, bg=BG_L); opt2_frm.pack(fill="x", anchor="w")
+        tk.Radiobutton(opt2_frm,
+                       text="Option 2 — Use only unused questions  ",
+                       variable=self._bank_option, value=2,
+                       bg=BG_L, fg=TXD, font=FB,
+                       activebackground=BG_L,
+                       command=self._on_bank_option).pack(side="left")
+        self._unused_lbl = tk.Label(opt2_frm,
+                                    text="(no data yet)",
+                                    bg=BG_L, fg=ETEC_TEAL, font=("Segoe UI", 9, "italic"))
+        self._unused_lbl.pack(side="left")
+
+        # Stats
         self._bstats = tk.StringVar(value="")
         tk.Label(p, textvariable=self._bstats, bg=BG_L, fg=BG_M,
                  font=FB, justify="left").pack(anchor="w", pady=4)
+
         _lbl(p, "Categories detected in 'Category' column", bold=True).pack(
             anchor="w", pady=(10, 4))
         self._cat_tree = _treeview(p,
             ["Category","Domain (D)","Count","Mean Difficulty","Min","Max"],
             [160, 140, 60, 120, 65, 65])
+
+    def _on_bank_option(self):
+        """Called when the user switches between Option 1 / Option 2."""
+        if self.bank_df is not None:
+            self._update_stats_display()
+
+    def _active_bank(self) -> pd.DataFrame:
+        """Return the bank that should be used for assembly."""
+        if self._bank_option.get() == 2 and self.bank_df is not None:
+            unused = self.bank_df[
+                ~self.bank_df["QuestionID"].astype(str).isin(self._used_qids)
+            ].copy()
+            return unused if not unused.empty else self.bank_df
+        return self.bank_df
+
+    def _update_stats_display(self):
+        """Refresh bstats label and category tree for the currently active bank."""
+        df = self._active_bank()
+        if df is None or df.empty:
+            return
+        self._bstats.set(
+            f"Questions: {len(df)}   |   Categories: {df['Category'].nunique()}   |   "
+            f"Difficulty: [{df['Difficulty'].min():.2f}, {df['Difficulty'].max():.2f}]   |   "
+            f"Mean: {df['Difficulty'].mean():.3f}")
+        for i in self._cat_tree.get_children(): self._cat_tree.delete(i)
+        for cat, g in df.groupby("Category"):
+            dom = g["D"].mode().iloc[0] if "D" in g else ""
+            self._cat_tree.insert("","end", values=[
+                cat, dom, len(g),
+                f"{g['Difficulty'].mean():.3f}",
+                f"{g['Difficulty'].min():.3f}",
+                f"{g['Difficulty'].max():.3f}"])
+
+    def _refresh_unused_label(self):
+        """Update the Option 2 unused count label after a generation run."""
+        if self.bank_df is None:
+            return
+        total   = len(self.bank_df)
+        used    = len(self._used_qids & set(self.bank_df["QuestionID"].astype(str)))
+        unused  = total - used
+        self._unused_lbl.config(
+            text=f"({unused} unused out of {total}  |  {used} used so far)")
 
     def _browse_bank(self):
         path = fd.askopenfilename(title="Select Question Bank",
@@ -1912,19 +1998,14 @@ class Mode1Window(_BaseMode):
         except Exception as e: self._q.put(("err", str(e)))
 
     def _on_bank(self, df, path):
-        self.bank_df = df; self.source_path = Path(path); self._bp.set(Path(path).name)
-        self._bstats.set(
-            f"Questions: {len(df)}   |   Categories: {df['Category'].nunique()}   |   "
-            f"Difficulty: [{df['Difficulty'].min():.2f}, {df['Difficulty'].max():.2f}]   |   "
-            f"Mean: {df['Difficulty'].mean():.3f}")
-        for i in self._cat_tree.get_children(): self._cat_tree.delete(i)
-        for cat, g in df.groupby("Category"):
-            dom = g["D"].mode().iloc[0] if "D" in g else ""
-            self._cat_tree.insert("","end", values=[
-                cat, dom, len(g),
-                f"{g['Difficulty'].mean():.3f}",
-                f"{g['Difficulty'].min():.3f}",
-                f"{g['Difficulty'].max():.3f}"])
+        self.bank_df = df
+        self.source_path = Path(path)
+        self._bp.set(Path(path).name)
+        # Reset cumulative usage when a new bank is loaded
+        self._used_qids = set()
+        self._bank_option.set(1)
+        self._unused_lbl.config(text="(no generations yet)")
+        self._update_stats_display()
         self._populate_subdomain_entries()
         self._sv.set(f"Loaded: {len(df)} questions")
 
@@ -2154,7 +2235,10 @@ class Mode1Window(_BaseMode):
         self._gbtn.config(state="disabled"); self._pv.set(0)
         self._logbox.config(state="normal"); self._logbox.delete("1.0","end")
         self._logbox.config(state="disabled")
-        threading.Thread(target=self._gen_t, args=(params,), daemon=True).start()
+        # Pass the currently active bank view (full or unused-only) to the thread
+        active_bank = self._active_bank()
+        threading.Thread(target=self._gen_t,
+                         args=(params, active_bank), daemon=True).start()
 
     def _collect(self) -> dict:
         def ii(e, n):
@@ -2214,12 +2298,15 @@ class Mode1Window(_BaseMode):
                 "n_students": ii(self._sim_n, "Simulation students"),
                 "seed": int(seed_s) if seed_s else None}
 
-    def _gen_t(self, p):
+    def _gen_t(self, p, active_bank):
         try:
             n = p["n_forms"]; params = p["params"]
             names = [f"Form_{i+1}" for i in range(n)]
-            self._lg(f"Starting assembly: {n} forms…")
-            results = assemble_forms(self.bank_df, params, "Difficulty", n, names)
+            bank_label = ("unused-only" if self._bank_option.get() == 2
+                          else "full bank")
+            self._lg(f"Starting assembly: {n} forms  [{bank_label}, "
+                     f"{len(active_bank)} questions]…")
+            results = assemble_forms(active_bank, params, "Difficulty", n, names)
             self._q.put(("prog", 40))
             for (form, mean_d, warns), name in zip(results, names):
                 for w in warns: self._lg(f"  ⚠ {w}", "yellow")
@@ -2264,18 +2351,27 @@ class Mode1Window(_BaseMode):
             for form, _, _ in results:
                 if "QuestionID" in form.columns:
                     used_ids.update(form["QuestionID"].dropna().astype(str).tolist())
+
+            # ── Cumulative tracking — update Option 2 pool ───────────────────
+            self._used_qids.update(used_ids)
+
+            # Write Remaining Questions based on FULL bank minus ALL ever used
             remaining = self.bank_df[
-                ~self.bank_df["QuestionID"].astype(str).isin(used_ids)
+                ~self.bank_df["QuestionID"].astype(str).isin(self._used_qids)
             ].copy()
             remaining.to_excel(str(rp), index=False, engine="openpyxl")
+            unused_count = len(remaining)
 
             self._q.put(("prog", 100))
             self._lg(f"\n  📁 Output folder   : {out_dir}")
             self._lg(f"  📄 Forms           : {fp.name}")
             self._lg(f"  📊 3PL Analysis    : {ap.name}")
-            self._lg(f"  📋 Remaining Qs    : {rp.name}")
+            self._lg(f"  📋 Remaining Qs    : {rp.name}  ({unused_count} questions)")
+            self._lg(f"\n  Bank status: {unused_count} unused / "
+                     f"{len(self.bank_df)} total questions remain",
+                     ETEC_TEAL)
             self._lg("\n✓ Generation complete!", "lime")
-            self._q.put(("done", valid))
+            self._q.put(("done_m1", valid, unused_count))
         except Exception as e:
             self._lg(f"\n✗ Error: {e}", "red")
             log.exception("Mode1 generation failed")
@@ -2301,6 +2397,8 @@ class Mode2Window(_BaseMode):
         self._q:           queue.Queue = queue.Queue()
         self._indicator_entries: list[tuple[str, dict[str, tk.Entry]]] = []
         self._bins_map:   dict[str, list] = {}
+        self._used_qids:  set[str] = set()
+        self._bank_option = tk.IntVar(value=1)
         self._build(); self.after(80, self._poll)
 
     def _build(self):
@@ -2367,6 +2465,27 @@ class Mode2Window(_BaseMode):
                  font=FB, width=55, anchor="w").pack(side="left")
         _btn(uf, "Upload Excel / CSV", self._browse_bank,
              bg=self.COLOR).pack(side="left", padx=8)
+
+        # ── Bank source selector ─────────────────────────────────────────────
+        src_frm = tk.LabelFrame(p, text="Assembly Bank Source",
+                                bg=BG_L, fg=BG_D, font=FH, padx=10, pady=8)
+        src_frm.pack(fill="x", pady=(8, 4))
+        tk.Radiobutton(src_frm,
+                       text="Option 1 — Use full uploaded bank  (all questions)",
+                       variable=self._bank_option, value=1,
+                       bg=BG_L, fg=TXD, font=FB, activebackground=BG_L,
+                       command=self._on_bank_option).pack(anchor="w")
+        opt2_frm = tk.Frame(src_frm, bg=BG_L); opt2_frm.pack(fill="x", anchor="w")
+        tk.Radiobutton(opt2_frm,
+                       text="Option 2 — Use only unused questions  ",
+                       variable=self._bank_option, value=2,
+                       bg=BG_L, fg=TXD, font=FB, activebackground=BG_L,
+                       command=self._on_bank_option).pack(side="left")
+        self._unused_lbl = tk.Label(opt2_frm, text="(no generations yet)",
+                                    bg=BG_L, fg=ETEC_TEAL,
+                                    font=("Segoe UI", 9, "italic"))
+        self._unused_lbl.pack(side="left")
+
         self._bstats = tk.StringVar(value="")
         tk.Label(p, textvariable=self._bstats, bg=BG_L, fg=BG_M,
                  font=FB, justify="left").pack(anchor="w", pady=4)
@@ -2408,9 +2527,33 @@ class Mode2Window(_BaseMode):
             df = load_bank_mode2(path); self._q.put(("bank", df, path))
         except Exception as e: self._q.put(("err", str(e)))
 
+    def _on_bank_option(self):
+        if self.bank_df is not None:
+            df = self._active_bank()
+            self._refresh_from_df(df)
+
+    def _active_bank(self) -> pd.DataFrame:
+        base = self._filtered_df if self._filtered_df is not None else self.bank_df
+        if self._bank_option.get() == 2 and base is not None:
+            unused = base[~base["QuestionID"].astype(str).isin(self._used_qids)].copy()
+            return unused if not unused.empty else base
+        return base
+
+    def _refresh_unused_label(self):
+        if self.bank_df is None: return
+        total  = len(self.bank_df)
+        used   = len(self._used_qids & set(self.bank_df["QuestionID"].astype(str)))
+        unused = total - used
+        self._unused_lbl.config(
+            text=f"({unused} unused out of {total}  |  {used} used so far)")
+
     def _on_bank(self, df, path):
         self.bank_df = df; self._filtered_df = df.copy()
         self.source_path = Path(path); self._bp.set(Path(path).name)
+        # Reset cumulative usage when a new bank is loaded
+        self._used_qids = set()
+        self._bank_option.set(1)
+        self._unused_lbl.config(text="(no generations yet)")
         has_f = all(c in df.columns for c in ("subject","grade","language"))
         if has_f:
             self._ffrm.pack(fill="x", pady=4)
@@ -2681,15 +2824,18 @@ class Mode2Window(_BaseMode):
 
     # ── Run logic ─────────────────────────────────────────────────────────────
     def _run(self):
-        df = self._filtered_df or self.bank_df
+        # Use the active bank view (full or unused-only)
+        df = self._active_bank()
         if df is None:
             mb.showerror("Error", "Please upload a question bank first."); return
         try: params, dcol = self._collect(df)
         except ValueError as e: mb.showerror("Configuration Error", str(e)); return
+        bank_label = "unused-only" if self._bank_option.get() == 2 else "full bank"
         self._gbtn.config(state="disabled"); self._pv.set(0)
         self._logbox.config(state="normal"); self._logbox.delete("1.0","end")
         self._logbox.config(state="disabled")
-        threading.Thread(target=self._gen_t, args=(df, params, dcol), daemon=True).start()
+        threading.Thread(target=self._gen_t,
+                         args=(df, params, dcol, bank_label), daemon=True).start()
 
     def _collect(self, df) -> tuple:
         def ii(e, n):
@@ -2788,11 +2934,11 @@ class Mode2Window(_BaseMode):
         self._n_forms_last = n_forms
         return params, dcol
 
-    def _gen_t(self, df, params, dcol):
+    def _gen_t(self, df, params, dcol, bank_label="full bank"):
         try:
             n = self._n_forms_last
             names = [f"Form_{i+1}" for i in range(n)]
-            self._lg(f"Starting assembly: {n} forms…")
+            self._lg(f"Starting assembly: {n} forms  [{bank_label}, {len(df)} questions]…")
             results = assemble_forms(df, params, dcol, n, names)
             self._q.put(("prog", 40))
 
@@ -2838,17 +2984,28 @@ class Mode2Window(_BaseMode):
             for form, _, _ in results:
                 if "QuestionID" in form.columns:
                     used_ids.update(form["QuestionID"].dropna().astype(str).tolist())
-            remaining = df[~df["QuestionID"].astype(str).isin(used_ids)].copy()
+
+            # Cumulative tracking — update Option 2 pool
+            self._used_qids.update(used_ids)
+
+            # Remaining = full bank minus ALL ever used
+            full_bank = self.bank_df if self.bank_df is not None else df
+            remaining = full_bank[
+                ~full_bank["QuestionID"].astype(str).isin(self._used_qids)
+            ].copy()
             remaining.drop(columns=[c for c in remaining.columns if c.startswith("_")],
                            errors="ignore").to_excel(str(rp), index=False, engine="openpyxl")
+            unused_count = len(remaining)
 
             self._q.put(("prog", 100))
             self._lg(f"\n  📁 Output folder   : {out_dir}")
             self._lg(f"  📄 Forms           : {fp.name}")
             self._lg(f"  📊 3PL Analysis    : {ap.name}")
-            self._lg(f"  📋 Remaining Qs    : {rp.name}")
+            self._lg(f"  📋 Remaining Qs    : {rp.name}  ({unused_count} questions)")
+            self._lg(f"\n  Bank status: {unused_count} unused / "
+                     f"{len(full_bank)} total questions remain", ETEC_TEAL)
             self._lg("\n✓ Generation complete!", "lime")
-            self._q.put(("done", valid))
+            self._q.put(("done_m2", valid, unused_count))
 
         except Exception as e:
             self._lg(f"\n✗ Error: {e}", "red")
