@@ -132,11 +132,23 @@ MODE2_STAGES: dict[str, dict] = {
 BIN_LABELS = [f"{i*0.1:.1f}-{(i+1)*0.1:.1f}" for i in range(10)]
 
 # Colours
-HDR_BG = "#1F3864"; HDR_FG = "#FFFFFF"
-SUB_BG = "#2E75B6"; ALT_BG = "#DCE6F1"
-ACCENT = "#ED7D31"
-CHART_C = ["#2E75B6","#ED7D31","#70AD47","#C00000",
-           "#7030A0","#00B0F0","#FF6600","#A9D18E"]
+# ── ETEC brand palette ────────────────────────────────────────────────────────
+ETEC_NAVY    = "#2D2B6E"   # primary navy-purple  (logo text & bg)
+ETEC_TEAL    = "#00AECB"   # top diamond
+ETEC_GREEN   = "#3BB573"   # left diamond
+ETEC_BLUE    = "#4B7EC8"   # centre diamond
+ETEC_PURPLE  = "#6B4C9A"   # right diamond
+ETEC_LIGHT   = "#F4F6FB"   # page background
+ETEC_WHITE   = "#FFFFFF"
+ETEC_BORDER  = "#D0D8EE"
+ETEC_ALT     = "#EAF0FA"   # alternate row
+
+# Legacy aliases used throughout the GUI
+HDR_BG = ETEC_NAVY;  HDR_FG = ETEC_WHITE
+SUB_BG = ETEC_BLUE;  ALT_BG = ETEC_ALT
+ACCENT = ETEC_TEAL
+CHART_C = [ETEC_BLUE, ETEC_TEAL, ETEC_GREEN, ETEC_PURPLE,
+           "#E05C2A", "#F0A500", "#C0392B", "#1ABC9C"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  COLUMN ALIAS MAPPING
@@ -1345,8 +1357,8 @@ def write_analysis_workbook(analyses: list[FormAnalysis], out_path: Path):
 
 FT = ("Segoe UI", 14, "bold"); FH = ("Segoe UI", 11, "bold")
 FB = ("Segoe UI", 10);          FM = ("Consolas", 9)
-BG_D = "#1F3864"; BG_M = "#2E75B6"; BG_L = "#EBF3FB"
-TXD = "#1A1A2E"; TXL = "#FFFFFF"
+BG_D = ETEC_NAVY;   BG_M = ETEC_BLUE;  BG_L = ETEC_LIGHT
+TXD = ETEC_NAVY;    TXL = ETEC_WHITE
 
 
 def _entry(p, w=14, **kw):
@@ -1404,7 +1416,7 @@ def _treeview(parent, columns, widths):
 
 def _log_widget(parent):
     frm = tk.Frame(parent, bg=BG_L); frm.pack(fill="both", expand=True)
-    box = tk.Text(frm, bg="#0D1117", fg="#58D68D", font=FM,
+    box = tk.Text(frm, bg="#0F1A2E", fg=ETEC_TEAL, font=FM,
                   state="disabled", relief="flat", height=18)
     sb  = ttk.Scrollbar(frm, command=box.yview)
     box.configure(yscrollcommand=sb.set)
@@ -1414,7 +1426,7 @@ def _log_widget(parent):
 
 def _append_log(box, msg, col=""):
     box.config(state="normal")
-    tag = col or "g"; box.tag_config(tag, foreground=col or "#58D68D")
+    tag = col or "g"; box.tag_config(tag, foreground=col or ETEC_TEAL)
     box.insert("end", msg + "\n", tag); box.see("end")
     box.config(state="disabled")
 
@@ -1422,78 +1434,224 @@ def _append_log(box, msg, col=""):
 #  LAUNCHER WINDOW
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _draw_etec_logo(canvas: tk.Canvas, x: int, y: int, scale: float = 1.0):
+    """
+    Draw the ETEC diamond-leaf logo programmatically on a Tkinter Canvas.
+    The logo consists of 8 diamond shapes arranged in a leaf/flower pattern.
+      x, y  = top-left origin of the bounding box
+      scale = size multiplier (1.0 → approx 80×70 px)
+    """
+    s = scale
+    # Diamond helper: draw a rotated-square diamond
+    def diamond(cx, cy, w, h, fill):
+        pts = [cx, cy-h, cx+w, cy, cx, cy+h, cx-w, cy]
+        canvas.create_polygon(pts, fill=fill, outline="", smooth=False)
+
+    # Layout: 8 diamonds in the ETEC leaf pattern
+    # Row 1 (top): teal pair
+    diamond(x+40*s, y+12*s,  11*s, 10*s, ETEC_TEAL)
+    diamond(x+58*s, y+12*s,  11*s, 10*s, ETEC_TEAL)
+    # Row 2: green(left), blue(centre-left), blue(centre-right), purple(right)
+    diamond(x+22*s, y+28*s,  11*s, 10*s, ETEC_GREEN)
+    diamond(x+40*s, y+28*s,  11*s, 10*s, ETEC_BLUE)
+    diamond(x+58*s, y+28*s,  11*s, 10*s, ETEC_BLUE)
+    diamond(x+76*s, y+28*s,  11*s, 10*s, ETEC_PURPLE)
+    # Row 3 (bottom): green(left), purple(right)
+    diamond(x+31*s, y+44*s,  11*s, 10*s, ETEC_GREEN)
+    diamond(x+67*s, y+44*s,  11*s, 10*s, ETEC_PURPLE)
+
+
 class LauncherWindow(tk.Tk):
+    """
+    ETEC-branded launcher — full-screen dashboard with company identity.
+    """
     def __init__(self):
         super().__init__()
-        self.title("STGS — Smart Test Generation System")
-        self.configure(bg=BG_D)
+        self.title("STGS — هيئة تقويم التعليم والتدريب")
+        self.configure(bg=ETEC_NAVY)
         self.resizable(True, True)
-        self.minsize(840, 560)
+        self.minsize(920, 620)
         self._build()
 
+    # ── Build ──────────────────────────────────────────────────────────────
     def _build(self):
-        hdr = tk.Frame(self, bg=BG_D, pady=22); hdr.pack(fill="x")
-        tk.Label(hdr, text="STGS", bg=BG_D, fg=TXL,
-                 font=("Segoe UI", 32, "bold")).pack()
-        tk.Label(hdr, text="Smart Test Generation System",
-                 bg=BG_D, fg="#A0BADB", font=("Segoe UI", 13)).pack()
+        self._build_header()
+        self._build_tiles()
+        self._build_footer()
 
-        sub = tk.Frame(self, bg=BG_D); sub.pack(fill="x")
-        tk.Label(sub, text="Select the type of exam you want to create",
-                 bg=BG_D, fg="#C9D8ED", font=("Segoe UI", 11)).pack()
+    # ── Header ─────────────────────────────────────────────────────────────
+    def _build_header(self):
+        hdr = tk.Frame(self, bg=ETEC_NAVY); hdr.pack(fill="x")
 
-        tiles = tk.Frame(self, bg=BG_D, pady=28); tiles.pack(expand=True)
+        # Top accent line (teal)
+        tk.Frame(hdr, bg=ETEC_TEAL, height=4).pack(fill="x")
 
-        self._tile(tiles, "📋",
-                   "Mode 1",
-                   "National & Standardised Exams",
-                   ("قدرات علمي · قدرات نظري\n"
-                    "التحصيلي · القدرة المعرفية\n"
-                    "قدرات الجامعيين\n\n"
-                    "Classification column : Category\n"
-                    "Domain column         : D\n"
-                    "Difficulty stages     : Stage1 · E · M · D"),
-                   "#2980B9", self._open1, col=0)
+        body = tk.Frame(hdr, bg=ETEC_NAVY, pady=18); body.pack(fill="x")
 
-        tk.Frame(tiles, bg="#3A5070", width=2).grid(
-            row=0, column=1, sticky="ns", padx=20, pady=10)
+        # ── Logo canvas (left) ─────────────────────────────────────────────
+        logo_c = tk.Canvas(body, bg=ETEC_NAVY, highlightthickness=0,
+                           width=110, height=65)
+        logo_c.pack(side="left", padx=(28, 0))
+        _draw_etec_logo(logo_c, x=5, y=2, scale=1.05)
 
-        self._tile(tiles, "🏫",
-                   "Mode 2",
-                   "Educational & Curriculum Assessments",
-                   ("علوم · رياضيات · قراءة\n"
-                    "الصف الثالث · السادس · التاسع\n"
-                    "نافس · القدرة المعرفية\n\n"
-                    "Learning outcome column : الناتج\n"
-                    "Indicator column        : المؤشر\n"
-                    "Filters: Subject · Grade · Language"),
-                   "#27AE60", self._open2, col=2)
+        # ── Text block (centre) ────────────────────────────────────────────
+        txt = tk.Frame(body, bg=ETEC_NAVY); txt.pack(side="left", padx=18)
 
-        ftr = tk.Frame(self, bg="#16284A", pady=8); ftr.pack(fill="x", side="bottom")
+        tk.Label(txt, text="هيئة تقويم التعليم والتدريب",
+                 bg=ETEC_NAVY, fg=ETEC_WHITE,
+                 font=("Segoe UI", 20, "bold"), justify="left").pack(anchor="w")
+        tk.Label(txt, text="Education & Training Evaluation Commission",
+                 bg=ETEC_NAVY, fg=ETEC_TEAL,
+                 font=("Segoe UI", 11), justify="left").pack(anchor="w")
+        tk.Frame(txt, bg=ETEC_TEAL, height=2).pack(fill="x", pady=(6, 2))
+        tk.Label(txt,
+                 text="Smart Test Generation System  |  STGS",
+                 bg=ETEC_NAVY, fg="#C8D8F0",
+                 font=("Segoe UI", 10), justify="left").pack(anchor="w")
+
+        # ── Version tag (right) ────────────────────────────────────────────
+        ver = tk.Frame(body, bg=ETEC_NAVY); ver.pack(side="right", padx=28)
+        tk.Label(ver, text="v3.0", bg=ETEC_NAVY, fg=ETEC_PURPLE,
+                 font=("Segoe UI", 9)).pack()
+
+    # ── Tile area ───────────────────────────────────────────────────────────
+    def _build_tiles(self):
+        # Subtitle
+        sub = tk.Frame(self, bg=ETEC_NAVY, pady=6); sub.pack(fill="x")
+        tk.Label(sub, text="Select the exam system you want to use",
+                 bg=ETEC_NAVY, fg="#8EA8CC",
+                 font=("Segoe UI", 11)).pack()
+
+        # Separator
+        tk.Frame(self, bg=ETEC_BORDER, height=1).pack(fill="x", padx=30)
+
+        outer = tk.Frame(self, bg=ETEC_LIGHT); outer.pack(fill="both", expand=True)
+
+        grid = tk.Frame(outer, bg=ETEC_LIGHT); grid.pack(expand=True, pady=30)
+
+        self._card(grid, col=0,
+            accent=ETEC_BLUE,
+            icon_text="📋",
+            mode_tag="MODE 1",
+            title="National & Standardised Exams",
+            subtitle="القدرات · التحصيلي · القدرة المعرفية",
+            bullets=[
+                "قدرات علمي  ·  قدرات نظري",
+                "التحصيلي  ·  القدرة المعرفية",
+                "قدرات الجامعيين",
+                "",
+                "Column: Category  |  Domain: D",
+                "Stages: Stage1 · E · M · D",
+            ],
+            command=self._open1)
+
+        # Divider
+        div = tk.Frame(grid, bg=ETEC_BORDER, width=1)
+        div.grid(row=0, column=1, sticky="ns", padx=24, pady=10)
+
+        self._card(grid, col=2,
+            accent=ETEC_GREEN,
+            icon_text="🏫",
+            mode_tag="MODE 2",
+            title="Educational & Curriculum Assessments",
+            subtitle="المناهج · الصفوف الدراسية · المؤشرات",
+            bullets=[
+                "علوم  ·  رياضيات  ·  قراءة",
+                "الصف الثالث  ·  السادس  ·  التاسع",
+                "نافس  ·  القدرة المعرفية",
+                "",
+                "Outcome: الناتج  |  Indicator: المؤشر",
+                "Filters: Subject · Grade · Language",
+            ],
+            command=self._open2)
+
+        grid.columnconfigure(0, weight=1)
+        grid.columnconfigure(2, weight=1)
+        grid.rowconfigure(0, weight=1)
+
+    def _card(self, parent, col, accent, icon_text,
+              mode_tag, title, subtitle, bullets, command):
+        """Render one mode card with ETEC styling."""
+        card = tk.Frame(parent, bg=ETEC_WHITE,
+                        relief="flat", bd=0, cursor="hand2")
+        card.grid(row=0, column=col, padx=18, sticky="nsew")
+
+        # Coloured top bar
+        tk.Frame(card, bg=accent, height=6).pack(fill="x")
+
+        body = tk.Frame(card, bg=ETEC_WHITE, padx=28, pady=20)
+        body.pack(fill="both", expand=True)
+
+        # Icon + mode tag row
+        top_row = tk.Frame(body, bg=ETEC_WHITE); top_row.pack(anchor="w")
+        tk.Label(top_row, text=icon_text, bg=ETEC_WHITE,
+                 font=("Segoe UI", 28)).pack(side="left", padx=(0, 10))
+        tag_frame = tk.Frame(top_row, bg=accent, padx=8, pady=2)
+        tag_frame.pack(side="left", anchor="s")
+        tk.Label(tag_frame, text=mode_tag, bg=accent, fg=ETEC_WHITE,
+                 font=("Segoe UI", 8, "bold")).pack()
+
+        # Title
+        tk.Label(body, text=title, bg=ETEC_WHITE, fg=ETEC_NAVY,
+                 font=("Segoe UI", 13, "bold"),
+                 wraplength=260, justify="left").pack(anchor="w", pady=(10, 2))
+
+        # Arabic subtitle
+        tk.Label(body, text=subtitle, bg=ETEC_WHITE, fg=accent,
+                 font=("Segoe UI", 10, "italic")).pack(anchor="w", pady=(0, 10))
+
+        # Separator
+        tk.Frame(body, bg=ETEC_BORDER, height=1).pack(fill="x", pady=(0, 10))
+
+        # Bullet points
+        for line in bullets:
+            if line == "":
+                tk.Frame(body, bg=ETEC_WHITE, height=4).pack()
+                continue
+            row = tk.Frame(body, bg=ETEC_WHITE); row.pack(anchor="w", pady=1)
+            tk.Label(row, text="▸", bg=ETEC_WHITE, fg=accent,
+                     font=("Segoe UI", 9)).pack(side="left")
+            tk.Label(row, text=f"  {line}", bg=ETEC_WHITE, fg="#444",
+                     font=("Segoe UI", 9)).pack(side="left")
+
+        # Open button
+        btn = tk.Button(body, text="Open  →",
+                        bg=accent, fg=ETEC_WHITE,
+                        font=("Segoe UI", 10, "bold"),
+                        relief="flat", padx=20, pady=7,
+                        cursor="hand2", command=command,
+                        activebackground=ETEC_NAVY,
+                        activeforeground=ETEC_WHITE)
+        btn.pack(anchor="w", pady=(16, 0))
+
+        # Hover effect — lighten card border
+        def _enter(_):
+            card.config(highlightbackground=accent,
+                        highlightthickness=2, relief="solid")
+        def _leave(_):
+            card.config(highlightthickness=0, relief="flat")
+        card.bind("<Enter>", _enter); card.bind("<Leave>", _leave)
+        card.bind("<Button-1>", lambda e: command())
+
+    # ── Footer ──────────────────────────────────────────────────────────────
+    def _build_footer(self):
+        ftr = tk.Frame(self, bg=ETEC_NAVY, pady=8)
+        ftr.pack(fill="x", side="bottom")
+
+        # Teal bottom accent
+        tk.Frame(ftr, bg=ETEC_TEAL, height=3).pack(fill="x", side="bottom")
+
         tk.Label(ftr,
-                 text="Both modes include: Stratified bin sampling · Mean-criterion retry · "
-                      "3PL auto-analysis · Professional Excel output",
-                 bg="#16284A", fg="#7FA8CC", font=("Segoe UI", 9)).pack()
+                 text="Stratified Bell Sampling  ·  Mean-Criterion Retry  ·  "
+                      "3PL Auto-Analysis  ·  Professional Excel Output",
+                 bg=ETEC_NAVY, fg="#6A86AA",
+                 font=("Segoe UI", 8)).pack()
+        tk.Label(ftr,
+                 text="© هيئة تقويم التعليم والتدريب  —  Education & Training Evaluation Commission",
+                 bg=ETEC_NAVY, fg="#4A5C78",
+                 font=("Segoe UI", 8)).pack()
 
-    def _tile(self, parent, icon, title, subtitle, desc, color, cmd, col):
-        outer = tk.Frame(parent, bg=color, cursor="hand2")
-        outer.grid(row=0, column=col, padx=12, pady=8, sticky="nsew")
-        outer.bind("<Button-1>", lambda e: cmd())
-        inner = tk.Frame(outer, bg=color, padx=26, pady=20)
-        inner.pack(fill="both", expand=True)
-        for widget, text, font in [
-            (tk.Label, icon,     ("Segoe UI", 34)),
-            (tk.Label, title,    ("Segoe UI", 16, "bold")),
-            (tk.Label, subtitle, ("Segoe UI", 11, "italic")),
-            (tk.Label, desc,     ("Segoe UI",  9)),
-        ]:
-            widget(inner, text=text, bg=color, fg=TXL, font=font,
-                   justify="center").pack(pady=2)
-        tk.Button(inner, text="Open →", bg="#FFFFFF", fg=color,
-                  font=("Segoe UI", 10, "bold"), relief="flat",
-                  padx=18, pady=5, cursor="hand2", command=cmd).pack(pady=(14, 0))
-        parent.columnconfigure(col, weight=1); parent.rowconfigure(0, weight=1)
-
+    # ── Navigation ──────────────────────────────────────────────────────────
     def _open1(self):
         self.withdraw()
         w = Mode1Window(on_close=self.deiconify)
@@ -1563,51 +1721,69 @@ class _BaseMode(tk.Toplevel):
 
 
 class Mode1Window(_BaseMode):
-    COLOR = "#2980B9"
+    COLOR = ETEC_BLUE
     _results_tab_idx = 3
 
     def __init__(self, on_close=None):
         super().__init__()
-        self.title("STGS — Mode 1: National & Standardised Exams")
-        self.configure(bg=BG_D); self.resizable(True, True); self.minsize(980, 700)
+        self.title("STGS — Mode 1 | هيئة تقويم التعليم والتدريب")
+        self.configure(bg=ETEC_NAVY); self.resizable(True, True); self.minsize(980, 700)
         self._on_close = on_close
         self.bank_df: Optional[pd.DataFrame] = None
         self.source_path: Optional[Path] = None
         self.analyses: list[FormAnalysis] = []
         self._q: queue.Queue = queue.Queue()
         self._sub_rows:  list[tuple[str, tk.Entry]] = []
-        self._bins_map:  dict[str, list] = {}   # category → list[Entry]
+        self._bins_map:  dict[str, list] = {}
         self._build(); self.after(80, self._poll)
 
     # ── build ─────────────────────────────────────────────────────────────────
     def _build(self):
-        hf = tk.Frame(self, bg=self.COLOR, pady=10); hf.pack(fill="x")
-        tk.Label(hf, text="📋  Mode 1 — National & Standardised Exams",
-                 bg=self.COLOR, fg=TXL, font=FT).pack(side="left", padx=16)
-        _btn(hf, "← Back", self._close, bg=BG_D).pack(side="right", padx=12)
+        # ── Top header bar ────────────────────────────────────────────────────
+        hf = tk.Frame(self, bg=ETEC_NAVY); hf.pack(fill="x")
+        tk.Frame(hf, bg=ETEC_TEAL, height=4).pack(fill="x")   # teal accent line
+        hf2 = tk.Frame(hf, bg=ETEC_NAVY, pady=8); hf2.pack(fill="x")
 
+        # Mini logo canvas
+        lc = tk.Canvas(hf2, bg=ETEC_NAVY, highlightthickness=0, width=64, height=44)
+        lc.pack(side="left", padx=(12, 0))
+        _draw_etec_logo(lc, x=2, y=1, scale=0.65)
+
+        txt = tk.Frame(hf2, bg=ETEC_NAVY); txt.pack(side="left", padx=10)
+        tk.Label(txt, text="Mode 1 — National & Standardised Exams",
+                 bg=ETEC_NAVY, fg=ETEC_WHITE, font=FT).pack(anchor="w")
+        tk.Label(txt, text="هيئة تقويم التعليم والتدريب  |  STGS",
+                 bg=ETEC_NAVY, fg=ETEC_TEAL, font=("Segoe UI", 9)).pack(anchor="w")
+
+        _btn(hf2, "← Back", self._close, bg=ETEC_PURPLE).pack(
+            side="right", padx=12, pady=4)
+
+        # ── Notebook ──────────────────────────────────────────────────────────
         s = ttk.Style(self); s.theme_use("clam")
-        s.configure("M1.TNotebook", background=self.COLOR, borderwidth=0)
-        s.configure("M1.TNotebook.Tab", background=BG_M, foreground=TXL,
-                    font=FH, padding=[12, 5])
+        s.configure("M1.TNotebook", background=ETEC_NAVY, borderwidth=0)
+        s.configure("M1.TNotebook.Tab",
+                    background=ETEC_BLUE, foreground=TXL, font=FH, padding=[12, 5])
         s.map("M1.TNotebook.Tab",
-              background=[("selected", self.COLOR)], foreground=[("selected", TXL)])
+              background=[("selected", ETEC_TEAL)],
+              foreground=[("selected", ETEC_WHITE)])
         self._nb = ttk.Notebook(self, style="M1.TNotebook")
         self._nb.pack(fill="both", expand=True, padx=8, pady=(4, 0))
 
         t1=_scroll_frame(self._nb); t2=_scroll_frame(self._nb)
         t3=tk.Frame(self._nb, bg=BG_L); t4=_scroll_frame(self._nb)
-        self._nb.add(t1, text="  Bank  "); self._nb.add(t2, text="  Configure  ")
-        self._nb.add(t3, text="  Generate  "); self._nb.add(t4, text="  Results  ")
+        self._nb.add(t1, text="  📂 Bank  "); self._nb.add(t2, text="  ⚙ Configure  ")
+        self._nb.add(t3, text="  ▶ Generate  "); self._nb.add(t4, text="  📊 Results  ")
 
         self._build_bank_tab(t1._inner)
         self._build_config_tab(t2._inner)
         self._build_generate_tab(t3)
         self._build_results_tab(t4._inner)
 
-        sf = tk.Frame(self, bg="#1A2E4A", height=22); sf.pack(fill="x", side="bottom")
+        # ── Status bar ────────────────────────────────────────────────────────
+        sf = tk.Frame(self, bg=ETEC_NAVY, height=22); sf.pack(fill="x", side="bottom")
+        tk.Frame(sf, bg=ETEC_TEAL, height=2).pack(fill="x", side="bottom")
         self._sv = tk.StringVar(value="Ready")
-        tk.Label(sf, textvariable=self._sv, bg="#1A2E4A", fg="#A0BADB",
+        tk.Label(sf, textvariable=self._sv, bg=ETEC_NAVY, fg=ETEC_TEAL,
                  font=FM, anchor="w", padx=8).pack(fill="x")
 
     # ── Bank tab ──────────────────────────────────────────────────────────────
@@ -2012,45 +2188,59 @@ class Mode1Window(_BaseMode):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Mode2Window(_BaseMode):
-    COLOR = "#27AE60"
+    COLOR = ETEC_GREEN
     _results_tab_idx = 4
 
     def __init__(self, on_close=None):
         super().__init__()
-        self.title("STGS — Mode 2: Educational & Curriculum Assessments")
-        self.configure(bg=BG_D); self.resizable(True, True); self.minsize(980, 700)
+        self.title("STGS — Mode 2 | هيئة تقويم التعليم والتدريب")
+        self.configure(bg=ETEC_NAVY); self.resizable(True, True); self.minsize(980, 700)
         self._on_close   = on_close
         self.bank_df:      Optional[pd.DataFrame] = None
         self._filtered_df: Optional[pd.DataFrame] = None
         self.source_path:  Optional[Path] = None
         self.analyses:     list[FormAnalysis] = []
         self._q:           queue.Queue = queue.Queue()
-        # outcome entry rows: list[(outcome_str, {indicator_str: Entry})]
         self._indicator_entries: list[tuple[str, dict[str, tk.Entry]]] = []
-        self._bins_map:   dict[str, list] = {}   # pair_key → list[Entry]
+        self._bins_map:   dict[str, list] = {}
         self._build(); self.after(80, self._poll)
 
     def _build(self):
-        hf = tk.Frame(self, bg=self.COLOR, pady=10); hf.pack(fill="x")
-        tk.Label(hf, text="🏫  Mode 2 — Educational & Curriculum Assessments",
-                 bg=self.COLOR, fg=TXL, font=FT).pack(side="left", padx=16)
-        _btn(hf, "← Back", self._close, bg=BG_D).pack(side="right", padx=12)
+        # ── Top header bar ────────────────────────────────────────────────────
+        hf = tk.Frame(self, bg=ETEC_NAVY); hf.pack(fill="x")
+        tk.Frame(hf, bg=ETEC_GREEN, height=4).pack(fill="x")   # green accent line
+        hf2 = tk.Frame(hf, bg=ETEC_NAVY, pady=8); hf2.pack(fill="x")
 
+        lc = tk.Canvas(hf2, bg=ETEC_NAVY, highlightthickness=0, width=64, height=44)
+        lc.pack(side="left", padx=(12, 0))
+        _draw_etec_logo(lc, x=2, y=1, scale=0.65)
+
+        txt = tk.Frame(hf2, bg=ETEC_NAVY); txt.pack(side="left", padx=10)
+        tk.Label(txt, text="Mode 2 — Educational & Curriculum Assessments",
+                 bg=ETEC_NAVY, fg=ETEC_WHITE, font=FT).pack(anchor="w")
+        tk.Label(txt, text="هيئة تقويم التعليم والتدريب  |  STGS",
+                 bg=ETEC_NAVY, fg=ETEC_GREEN, font=("Segoe UI", 9)).pack(anchor="w")
+
+        _btn(hf2, "← Back", self._close, bg=ETEC_PURPLE).pack(
+            side="right", padx=12, pady=4)
+
+        # ── Notebook ──────────────────────────────────────────────────────────
         s = ttk.Style(self); s.theme_use("clam")
-        s.configure("M2.TNotebook", background=self.COLOR, borderwidth=0)
-        s.configure("M2.TNotebook.Tab", background="#2ECC71", foreground=TXL,
-                    font=FH, padding=[12, 5])
+        s.configure("M2.TNotebook", background=ETEC_NAVY, borderwidth=0)
+        s.configure("M2.TNotebook.Tab",
+                    background=ETEC_GREEN, foreground=TXL, font=FH, padding=[12, 5])
         s.map("M2.TNotebook.Tab",
-              background=[("selected", self.COLOR)], foreground=[("selected", TXL)])
+              background=[("selected", ETEC_TEAL)],
+              foreground=[("selected", ETEC_WHITE)])
         self._nb = ttk.Notebook(self, style="M2.TNotebook")
         self._nb.pack(fill="both", expand=True, padx=8, pady=(4, 0))
 
         t1=_scroll_frame(self._nb); t2=_scroll_frame(self._nb)
         t3=_scroll_frame(self._nb); t4=tk.Frame(self._nb, bg=BG_L)
         t5=_scroll_frame(self._nb)
-        self._nb.add(t1, text="  Bank  ");  self._nb.add(t2, text="  Configure  ")
-        self._nb.add(t3, text="  Bins  ");  self._nb.add(t4, text="  Generate  ")
-        self._nb.add(t5, text="  Results  ")
+        self._nb.add(t1, text="  📂 Bank  ");  self._nb.add(t2, text="  ⚙ Configure  ")
+        self._nb.add(t3, text="  📐 Bins  ");  self._nb.add(t4, text="  ▶ Generate  ")
+        self._nb.add(t5, text="  📊 Results  ")
 
         self._build_bank_tab(t1._inner)
         self._build_config_tab(t2._inner)
@@ -2058,9 +2248,11 @@ class Mode2Window(_BaseMode):
         self._build_generate_tab(t4)
         self._build_results_tab(t5._inner)
 
-        sf = tk.Frame(self, bg="#1A3D28", height=22); sf.pack(fill="x", side="bottom")
+        # ── Status bar ────────────────────────────────────────────────────────
+        sf = tk.Frame(self, bg=ETEC_NAVY, height=22); sf.pack(fill="x", side="bottom")
+        tk.Frame(sf, bg=ETEC_GREEN, height=2).pack(fill="x", side="bottom")
         self._sv = tk.StringVar(value="Ready")
-        tk.Label(sf, textvariable=self._sv, bg="#1A3D28", fg="#A9DFBF",
+        tk.Label(sf, textvariable=self._sv, bg=ETEC_NAVY, fg=ETEC_GREEN,
                  font=FM, anchor="w", padx=8).pack(fill="x")
 
     # ── Bank tab ──────────────────────────────────────────────────────────────
