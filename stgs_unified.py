@@ -1508,11 +1508,19 @@ class LauncherWindow(tk.Tk):
                  text="Smart Test Generation System  |  STGS",
                  bg=ETEC_NAVY, fg="#C8D8F0",
                  font=("Segoe UI", 10), justify="left").pack(anchor="w")
+        tk.Label(txt,
+                 text="إدارة الاختبارات الرقمية",
+                 bg=ETEC_NAVY, fg=ETEC_PURPLE,
+                 font=("Segoe UI", 10, "italic"), justify="left").pack(anchor="w")
 
-        # ── Version tag (right) ────────────────────────────────────────────
+        # ── Version + creator tag (right) ──────────────────────────────────
         ver = tk.Frame(body, bg=ETEC_NAVY); ver.pack(side="right", padx=28)
         tk.Label(ver, text="v3.0", bg=ETEC_NAVY, fg=ETEC_PURPLE,
                  font=("Segoe UI", 9)).pack()
+        tk.Label(ver, text="Created by", bg=ETEC_NAVY, fg="#6A86AA",
+                 font=("Segoe UI", 7)).pack(pady=(6, 0))
+        tk.Label(ver, text="Saeed Alkaltham", bg=ETEC_NAVY, fg=ETEC_TEAL,
+                 font=("Segoe UI", 8, "bold")).pack()
 
     # ── Tile area ───────────────────────────────────────────────────────────
     def _build_tiles(self):
@@ -1635,21 +1643,41 @@ class LauncherWindow(tk.Tk):
 
     # ── Footer ──────────────────────────────────────────────────────────────
     def _build_footer(self):
-        ftr = tk.Frame(self, bg=ETEC_NAVY, pady=8)
+        ftr = tk.Frame(self, bg=ETEC_NAVY, pady=6)
         ftr.pack(fill="x", side="bottom")
 
-        # Teal bottom accent
+        # Teal bottom accent line
         tk.Frame(ftr, bg=ETEC_TEAL, height=3).pack(fill="x", side="bottom")
 
+        # Features line
         tk.Label(ftr,
                  text="Stratified Bell Sampling  ·  Mean-Criterion Retry  ·  "
                       "3PL Auto-Analysis  ·  Professional Excel Output",
                  bg=ETEC_NAVY, fg="#6A86AA",
                  font=("Segoe UI", 8)).pack()
-        tk.Label(ftr,
+
+        # Department + company + creator — all on one row
+        row = tk.Frame(ftr, bg=ETEC_NAVY); row.pack(pady=(2, 0))
+
+        tk.Label(row,
+                 text="إدارة الاختبارات الرقمية  |  ",
+                 bg=ETEC_NAVY, fg=ETEC_PURPLE,
+                 font=("Segoe UI", 8, "italic")).pack(side="left")
+
+        tk.Label(row,
                  text="© هيئة تقويم التعليم والتدريب  —  Education & Training Evaluation Commission",
                  bg=ETEC_NAVY, fg="#4A5C78",
-                 font=("Segoe UI", 8)).pack()
+                 font=("Segoe UI", 8)).pack(side="left")
+
+        tk.Label(row,
+                 text="  |  Created by  ",
+                 bg=ETEC_NAVY, fg="#4A5C78",
+                 font=("Segoe UI", 8)).pack(side="left")
+
+        tk.Label(row,
+                 text="Saeed Alkaltham",
+                 bg=ETEC_NAVY, fg=ETEC_TEAL,
+                 font=("Segoe UI", 8, "bold")).pack(side="left")
 
     # ── Navigation ──────────────────────────────────────────────────────────
     def _open1(self):
@@ -1754,6 +1782,10 @@ class Mode1Window(_BaseMode):
                  bg=ETEC_NAVY, fg=ETEC_WHITE, font=FT).pack(anchor="w")
         tk.Label(txt, text="هيئة تقويم التعليم والتدريب  |  STGS",
                  bg=ETEC_NAVY, fg=ETEC_TEAL, font=("Segoe UI", 9)).pack(anchor="w")
+        tk.Label(txt,
+                 text="إدارة الاختبارات الرقمية  ·  Created by Saeed Alkaltham",
+                 bg=ETEC_NAVY, fg=ETEC_PURPLE,
+                 font=("Segoe UI", 8, "italic")).pack(anchor="w")
 
         _btn(hf2, "← Back", self._close, bg=ETEC_PURPLE).pack(
             side="right", padx=12, pady=4)
@@ -2220,6 +2252,10 @@ class Mode2Window(_BaseMode):
                  bg=ETEC_NAVY, fg=ETEC_WHITE, font=FT).pack(anchor="w")
         tk.Label(txt, text="هيئة تقويم التعليم والتدريب  |  STGS",
                  bg=ETEC_NAVY, fg=ETEC_GREEN, font=("Segoe UI", 9)).pack(anchor="w")
+        tk.Label(txt,
+                 text="إدارة الاختبارات الرقمية  ·  Created by Saeed Alkaltham",
+                 bg=ETEC_NAVY, fg=ETEC_PURPLE,
+                 font=("Segoe UI", 8, "italic")).pack(anchor="w")
 
         _btn(hf2, "← Back", self._close, bg=ETEC_PURPLE).pack(
             side="right", padx=12, pady=4)
