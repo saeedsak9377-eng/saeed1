@@ -1214,18 +1214,24 @@ def write_forms_workbook(
         # ── Summary header ──────────────────────────────────────────────────
         ws.merge_range("A1:D1", name, fmts["ttl"])
         ws.set_row(0, 22)
-        metrics = [
-            ("Number of Items",          len(df),                            False),
+
+        # Column widths for the summary block
+        ws.set_column(0, 0, 30)   # Metric label
+        ws.set_column(1, 1, 14)   # Overall value
+
+        # ── Overall metrics (left block, columns A-B) ────────────────────────
+        overall_metrics = [
+            ("Number of Items",           len(df),                             False),
             ("Mean Difficulty",           df[dcol].mean() if dcol in df else "—", True),
             ("Min Difficulty",            df[dcol].min()  if dcol in df else "—", True),
             ("Max Difficulty",            df[dcol].max()  if dcol in df else "—", True),
             ("Avg Discrimination (a)",    df[acol].mean() if acol in df else "—", True),
-            ("Simulated Cronbach Alpha",  fa.alpha     if fa else "—",            True),
-            ("Simulated Item Correlation",fa.item_corr if fa else "—",            True),
+            ("Simulated Cronbach Alpha",  fa.alpha     if fa else "—",             True),
+            ("Simulated Item Correlation",fa.item_corr if fa else "—",             True),
         ]
-        ws.write(2, 0, "Metric", fmts["shdr"]); ws.write(2, 1, "Value", fmts["shdr"])
-        ws.set_column(0, 0, 30); ws.set_column(1, 1, 14)
-        for ri, (lbl, val, is_f) in enumerate(metrics):
+        ws.write(2, 0, "Metric",        fmts["shdr"])
+        ws.write(2, 1, "Overall",       fmts["shdr"])
+        for ri, (lbl, val, is_f) in enumerate(overall_metrics):
             r = 3 + ri
             ws.write(r, 0, lbl, fmts["mlbl"])
             if isinstance(val, str):
@@ -1235,6 +1241,39 @@ def write_forms_workbook(
                 except: ws.write(r, 1, str(val), fmts["dat"])
             else:
                 ws.write_number(r, 1, int(val) if val else 0, fmts["mvi"])
+
+        # ── Per-D-domain stats (columns C onwards, one column per domain) ────
+        if domain_col in df.columns:
+            domains = [d for d in df[domain_col].dropna().unique()
+                       if str(d).strip()]
+            dom_start_col = 2          # column C = index 2
+            for di, dom in enumerate(domains):
+                col_idx = dom_start_col + di
+                col_w   = 14
+                ws.set_column(col_idx, col_idx, col_w)
+                sub = df[df[domain_col] == dom]
+                sub_diff = pd.to_numeric(sub[dcol], errors="coerce").dropna() \
+                           if dcol in sub.columns else pd.Series(dtype=float)
+
+                # Domain column header
+                ws.write(2, col_idx, f"Domain: {dom}", fmts["shdr"])
+
+                # Rows: N items, Mean, Min, Max for this domain, rest blank
+                domain_metrics = [
+                    len(sub),
+                    float(sub_diff.mean()) if not sub_diff.empty else None,
+                    float(sub_diff.min())  if not sub_diff.empty else None,
+                    float(sub_diff.max())  if not sub_diff.empty else None,
+                    None, None, None,  # Discrimination / Alpha / Corr not per-domain
+                ]
+                for ri, val in enumerate(domain_metrics):
+                    r = 3 + ri
+                    if val is None:
+                        ws.write(r, col_idx, "—", fmts["dat"])
+                    elif ri == 0:
+                        ws.write_number(r, col_idx, int(val), fmts["mvi"])
+                    else:
+                        ws.write_number(r, col_idx, val, fmts["mval"])
 
         # ── Warnings ────────────────────────────────────────────────────────
         warn_row = 11
@@ -1513,14 +1552,7 @@ class LauncherWindow(tk.Tk):
                  bg=ETEC_NAVY, fg=ETEC_PURPLE,
                  font=("Segoe UI", 10, "italic"), justify="left").pack(anchor="w")
 
-        # ── Version + creator tag (right) ──────────────────────────────────
-        ver = tk.Frame(body, bg=ETEC_NAVY); ver.pack(side="right", padx=28)
-        tk.Label(ver, text="v3.0", bg=ETEC_NAVY, fg=ETEC_PURPLE,
-                 font=("Segoe UI", 9)).pack()
-        tk.Label(ver, text="Created by", bg=ETEC_NAVY, fg="#6A86AA",
-                 font=("Segoe UI", 7)).pack(pady=(6, 0))
-        tk.Label(ver, text="Saeed Alkaltham", bg=ETEC_NAVY, fg=ETEC_TEAL,
-                 font=("Segoe UI", 8, "bold")).pack()
+        # (no version/creator tag in header — shown in footer only)
 
     # ── Tile area ───────────────────────────────────────────────────────────
     def _build_tiles(self):
@@ -1783,7 +1815,7 @@ class Mode1Window(_BaseMode):
         tk.Label(txt, text="هيئة تقويم التعليم والتدريب  |  STGS",
                  bg=ETEC_NAVY, fg=ETEC_TEAL, font=("Segoe UI", 9)).pack(anchor="w")
         tk.Label(txt,
-                 text="إدارة الاختبارات الرقمية  ·  Created by Saeed Alkaltham",
+                 text="إدارة الاختبارات الرقمية",
                  bg=ETEC_NAVY, fg=ETEC_PURPLE,
                  font=("Segoe UI", 8, "italic")).pack(anchor="w")
 
@@ -2253,7 +2285,7 @@ class Mode2Window(_BaseMode):
         tk.Label(txt, text="هيئة تقويم التعليم والتدريب  |  STGS",
                  bg=ETEC_NAVY, fg=ETEC_GREEN, font=("Segoe UI", 9)).pack(anchor="w")
         tk.Label(txt,
-                 text="إدارة الاختبارات الرقمية  ·  Created by Saeed Alkaltham",
+                 text="إدارة الاختبارات الرقمية",
                  bg=ETEC_NAVY, fg=ETEC_PURPLE,
                  font=("Segoe UI", 8, "italic")).pack(anchor="w")
 
