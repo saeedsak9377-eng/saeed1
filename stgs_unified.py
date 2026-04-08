@@ -1710,11 +1710,26 @@ class Mode1Window(_BaseMode):
         for row, (var, text) in enumerate([
             (self._stats_var,   "Enable discrimination filter (Discrimination ≥ 0.85)"),
             (self._partial_var, "Allow partial fill (placeholder rows when short)"),
-            (self._reuse_var,   "Allow reuse across forms (max 2 times per question, never in same form)"),
         ], start=4):
             tk.Checkbutton(pf, text=text, variable=var,
                            bg=BG_L, fg=TXD, font=FB).grid(
                 row=row, column=0, columnspan=2, sticky="w", pady=2)
+
+        # Reuse row: checkbox + "Fill in:" label + spinbox on the same line
+        reuse_frm = tk.Frame(pf, bg=BG_L)
+        reuse_frm.grid(row=6, column=0, columnspan=2, sticky="w", pady=2)
+        tk.Checkbutton(reuse_frm, text="Allow reuse across forms — never in same form",
+                       variable=self._reuse_var,
+                       bg=BG_L, fg=TXD, font=FB).pack(side="left")
+        tk.Label(reuse_frm, text="   Fill in:",
+                 bg=BG_L, fg=TXD, font=FB).pack(side="left")
+        self._max_reuse_m1 = tk.Spinbox(
+            reuse_frm, from_=2, to=10, width=4, font=FB,
+            bg="#FFF", fg="#000", relief="solid", bd=1)
+        self._max_reuse_m1.delete(0, "end"); self._max_reuse_m1.insert(0, "2")
+        self._max_reuse_m1.pack(side="left", padx=4)
+        tk.Label(reuse_frm, text="times max per question",
+                 bg=BG_L, fg=TXD, font=FB).pack(side="left")
 
         self._sim_n = self._le(pf, "Simulation students:", 7, "3000")
         self._seed  = self._le(pf, "RNG Seed (blank=random):", 8, "")
@@ -1795,7 +1810,7 @@ class Mode1Window(_BaseMode):
             f"Bins        : {'Enabled' if self._use_bins.get() else 'Disabled'}",
             f"Disc filter : {'Enabled (≥0.85)' if self._stats_var.get() else 'Disabled'}",
             f"Partial fill: {'Enabled' if self._partial_var.get() else 'Disabled'}",
-            f"Reuse       : {'Enabled' if self._reuse_var.get() else 'Disabled'}",
+            f"Reuse       : {'Enabled — max ' + self._max_reuse_m1.get() + 'x per question' if self._reuse_var.get() else 'Disabled'}",
         ]
         mb.showinfo("Settings Preview", "\n".join(lines))
 
@@ -1910,6 +1925,10 @@ class Mode1Window(_BaseMode):
             raise ValueError("No categories configured. Select an exam template.")
 
         seed_s = self._seed.get().strip()
+        try:
+            max_reuse_val = max(2, int(self._max_reuse_m1.get()))
+        except ValueError:
+            max_reuse_val = 2
         params = AssemblyParams(
             slots=slots,
             diff_range=diff_range,
@@ -1917,7 +1936,7 @@ class Mode1Window(_BaseMode):
             min_discrimination=0.85 if self._stats_var.get() else None,
             allow_partial_fill=self._partial_var.get(),
             allow_reuse=self._reuse_var.get(),
-            max_reuse=3,
+            max_reuse=max_reuse_val,
             max_retries=100,
             rng_seed=int(seed_s) if seed_s else None,
         )
@@ -2229,11 +2248,27 @@ class Mode2Window(_BaseMode):
         for row, (var, text) in enumerate([
             (self._stats_var,   "Enable discrimination filter (تمييز ≥ 0.50)"),
             (self._partial_var, "Allow partial fill (placeholder rows when short)"),
-            (self._reuse_var,   "Allow reuse across forms (max 2 times per question, never in same form)"),
         ], start=4):
             tk.Checkbutton(pf, text=text, variable=var,
                            bg=BG_L, fg=TXD, font=FB).grid(
                 row=row, column=0, columnspan=2, sticky="w", pady=2)
+
+        # Reuse row: checkbox + "Fill in:" label + spinbox on the same line
+        reuse_frm = tk.Frame(pf, bg=BG_L)
+        reuse_frm.grid(row=6, column=0, columnspan=2, sticky="w", pady=2)
+        tk.Checkbutton(reuse_frm, text="Allow reuse across forms — never in same form",
+                       variable=self._reuse_var,
+                       bg=BG_L, fg=TXD, font=FB).pack(side="left")
+        tk.Label(reuse_frm, text="   Fill in:",
+                 bg=BG_L, fg=TXD, font=FB).pack(side="left")
+        self._max_reuse_m2 = tk.Spinbox(
+            reuse_frm, from_=2, to=10, width=4, font=FB,
+            bg="#FFF", fg="#000", relief="solid", bd=1)
+        self._max_reuse_m2.delete(0, "end"); self._max_reuse_m2.insert(0, "2")
+        self._max_reuse_m2.pack(side="left", padx=4)
+        tk.Label(reuse_frm, text="times max per question",
+                 bg=BG_L, fg=TXD, font=FB).pack(side="left")
+
         self._sim_n = self._le(pf, "Simulation students:", 7, "3000")
         self._seed  = self._le(pf, "RNG Seed (blank=random):", 8, "")
         _btn(pf, "Save & Preview Settings", self._save_settings,
@@ -2270,7 +2305,7 @@ class Mode2Window(_BaseMode):
             f"Forms           : {n_forms}",
             f"Disc filter     : {'Enabled (≥0.5)' if self._stats_var.get() else 'Disabled'}",
             f"Partial fill    : {'Enabled' if self._partial_var.get() else 'Disabled'}",
-            f"Reuse           : {'Enabled' if self._reuse_var.get() else 'Disabled'}",
+            f"Reuse           : {'Enabled — max ' + self._max_reuse_m2.get() + 'x per question' if self._reuse_var.get() else 'Disabled'}",
         ]
         mb.showinfo("Settings Preview", "\n".join(lines))
 
@@ -2441,6 +2476,10 @@ class Mode2Window(_BaseMode):
                 "(pair mode) or ensure outcomes are detected.")
 
         seed_s = self._seed.get().strip()
+        try:
+            max_reuse_val = max(2, int(self._max_reuse_m2.get()))
+        except ValueError:
+            max_reuse_val = 2
         params = AssemblyParams(
             slots=slots,
             diff_range=diff_range,
@@ -2448,7 +2487,7 @@ class Mode2Window(_BaseMode):
             min_discrimination=0.5 if self._stats_var.get() else None,
             allow_partial_fill=self._partial_var.get(),
             allow_reuse=self._reuse_var.get(),
-            max_reuse=3,
+            max_reuse=max_reuse_val,
             max_retries=100,
             rng_seed=int(seed_s) if seed_s else None,
         )
