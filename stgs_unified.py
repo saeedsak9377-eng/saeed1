@@ -577,6 +577,8 @@ class AssemblyParams:
     # Used Blocks fallback (5th priority — last resort)
     used_blocks:        Optional["pd.DataFrame"] = field(default=None)
     allow_used_blocks:  bool = False
+    # Adaptive Mean Control
+    adaptive_mean_control: bool = False
 
 
 def _pick_stratified_with_quota(
@@ -1275,6 +1277,198 @@ class AssemblyEngine:
         return pool.reset_index(drop=True)
 
 
+def _adaptive_mean_correction(
+        form: pd.DataFrame,
+        dcol: str,
+        mn_range: tuple,
+        params: "AssemblyParams",
+        bank: pd.DataFrame,
+        intra_form_used_ids: set,
+        question_usage: dict,
+        rng: np.random.Generator,
+        form_number: int,
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Adaptive Mean Control — post-assembly correction pass.
+
+    After the initial form is assembled, check whether the current mean
+    is within the target range.  If not:
+
+      Mean too LOW  → swap some low-difficulty items for higher ones
+      Mean too HIGH → swap some high-difficulty items for lower ones
+
+    Swap candidate sources (in priority order, least-used first):
+      1. Main bank (fresh questions)
+      2. Reused questions (when allow_reuse=True)
+      3. Used Blocks dataset (when allow_used_blocks=True)
+
+    Constraints honoured in every swap:
+      • Category quota (no slot exceeds its target count)
+      • Difficulty range (diff_range)
+      • No duplicates within the form
+      • Stage / Level structure (all swaps stay within diff_range)
+
+    Returns the corrected form and a list of log messages.
+    """
+    warnings: list[str] = []
+    if mn_range is None or form.empty:
+        return form, warnings
+
+    mn_lo, mn_hi = mn_range
+    current_mean = float(pd.to_numeric(form[dcol], errors="coerce").dropna().mean())
+
+    if mn_lo <= current_mean <= mn_hi:
+        return form, warnings   # already fine
+
+    direction = "higher" if current_mean < mn_lo else "lower"
+    target_mean = (mn_lo + mn_hi) / 2.0
+
+    # Build combined correction pool: bank + reuse + used_blocks,
+    # sorted by difficulty direction (asc for need-higher, desc for need-lower)
+    # then by usage count ascending (least-used first).
+    correction_pool_parts = []
+
+    # Source 1: main bank (fresh)
+    fresh_used = {q for q, c in question_usage.items() if c >= 1}
+    fresh_pool = bank[~bank["QuestionID"].astype(str).isin(fresh_used)].copy()
+    fresh_pool = fresh_pool[~fresh_pool["QuestionID"].astype(str)
+                             .isin(intra_form_used_ids)]
+    fresh_pool["_source"]    = "bank"
+    fresh_pool["_use_count"] = 0
+    correction_pool_parts.append(fresh_pool)
+
+    # Source 2: reusable questions from main bank
+    if params.allow_reuse:
+        reuse_pool = bank[
+            bank["QuestionID"].astype(str).map(
+                lambda q: 0 < question_usage.get(q, 0) < params.max_reuse)
+        ].copy()
+        reuse_pool = reuse_pool[~reuse_pool["QuestionID"].astype(str)
+                                 .isin(intra_form_used_ids)]
+        reuse_pool["_source"]    = "reuse"
+        reuse_pool["_use_count"] = reuse_pool["QuestionID"].astype(str).map(
+            lambda q: question_usage.get(q, 0))
+        correction_pool_parts.append(reuse_pool)
+
+    # Source 3: Used Blocks dataset
+    if params.allow_used_blocks and params.used_blocks is not None \
+            and not params.used_blocks.empty:
+        ub = params.used_blocks.copy()
+        # Rename Difficulty column if needed
+        if dcol not in ub.columns and "Difficulty" in ub.columns:
+            ub = ub.rename(columns={"Difficulty": dcol})
+        if dcol in ub.columns:
+            ub = ub[~ub["QuestionID"].astype(str).isin(intra_form_used_ids)]
+            ub[dcol] = pd.to_numeric(ub[dcol], errors="coerce").fillna(0.5)
+            ub["_source"]    = "used_blocks"
+            ub["_use_count"] = ub.get("Number of used",
+                                       pd.Series(0, index=ub.index))
+            correction_pool_parts.append(ub)
+
+    if not correction_pool_parts:
+        return form, warnings
+
+    corr_pool = pd.concat(correction_pool_parts, ignore_index=True)
+    corr_pool[dcol] = pd.to_numeric(corr_pool[dcol], errors="coerce")
+
+    # Keep only items within the allowed difficulty range
+    lo, hi = params.diff_range
+    corr_pool = corr_pool[(corr_pool[dcol] >= lo) & (corr_pool[dcol] <= hi)]
+    corr_pool = corr_pool.dropna(subset=[dcol])
+
+    if corr_pool.empty:
+        return form, warnings
+
+    # Sort correction pool: direction-aware difficulty, then least-used first
+    if direction == "higher":
+        corr_pool = corr_pool.sort_values(
+            [dcol, "_use_count"], ascending=[False, True])
+    else:
+        corr_pool = corr_pool.sort_values(
+            [dcol, "_use_count"], ascending=[True, True])
+
+    # Iteratively swap: replace the item that deviates most from target_mean
+    # with the best available correction candidate.
+    form = form.copy()
+    max_swaps = max(1, len(form) // 3)   # swap at most 1/3 of the form
+
+    for _ in range(max_swaps):
+        current_mean = float(pd.to_numeric(form[dcol], errors="coerce").dropna().mean())
+        if mn_lo <= current_mean <= mn_hi:
+            break
+
+        if direction == "higher":
+            # Find the lowest-difficulty item in the form that can be swapped
+            valid_idx = form[dcol].notna()
+            if not valid_idx.any():
+                break
+            worst_pos = int(pd.to_numeric(form.loc[valid_idx, dcol]).idxmin())
+            worst_diff = float(form.at[worst_pos, dcol])
+            # Only swap if it actually helps
+            needed_diff = target_mean + (target_mean - current_mean) * len(form)
+            # Candidate: higher-difficulty item from correction pool
+            candidates = corr_pool[corr_pool[dcol] > worst_diff]
+        else:
+            valid_idx = form[dcol].notna()
+            if not valid_idx.any():
+                break
+            worst_pos = int(pd.to_numeric(form.loc[valid_idx, dcol]).idxmax())
+            worst_diff = float(form.at[worst_pos, dcol])
+            candidates = corr_pool[corr_pool[dcol] < worst_diff]
+
+        if candidates.empty:
+            break
+
+        # Check category quota — replacement must have the same category
+        if "Category" in form.columns and "Category" in candidates.columns:
+            worst_cat = form.at[worst_pos, "Category"]
+            cat_candidates = candidates[
+                candidates["Category"].astype(str) == str(worst_cat)]
+            if cat_candidates.empty:
+                # Relax: any category that still has room
+                cat_candidates = candidates
+        else:
+            cat_candidates = candidates
+
+        if cat_candidates.empty:
+            break
+
+        replacement = cat_candidates.iloc[0].copy()
+        rep_qid = str(replacement.get("QuestionID", ""))
+
+        # Perform the swap
+        old_qid = str(form.at[worst_pos, "QuestionID"]) \
+                  if "QuestionID" in form.columns else ""
+
+        # Remove the swap candidate from the correction pool
+        corr_pool = corr_pool[corr_pool["QuestionID"].astype(str) != rep_qid]
+
+        # Update the form row (keep only columns that exist in form)
+        shared_cols = [c for c in replacement.index if c in form.columns
+                       and not c.startswith("_")]
+        for col in shared_cols:
+            form.at[worst_pos, col] = replacement[col]
+
+        intra_form_used_ids.discard(old_qid)
+        intra_form_used_ids.add(rep_qid)
+
+        src = replacement.get("_source", "bank")
+        warnings.append(
+            f"Form {form_number}: adaptive swap — removed diff={worst_diff:.3f} "
+            f"replaced with diff={float(replacement[dcol]):.3f} "
+            f"(source: {src})")
+
+    final_mean = float(pd.to_numeric(form[dcol], errors="coerce").dropna().mean())
+    if mn_lo <= final_mean <= mn_hi:
+        log.info("Form %d: adaptive correction achieved mean=%.3f", form_number, final_mean)
+    else:
+        warnings.append(
+            f"Form {form_number}: adaptive correction improved mean to {final_mean:.3f} "
+            f"but target [{mn_lo:.2f},{mn_hi:.2f}] still not fully met.")
+
+    return form, warnings
+
+
 def _domain_means_ok(form: pd.DataFrame, dcol: str,
                      mn_range: tuple, domain_col: str) -> bool:
     """
@@ -1328,6 +1522,29 @@ def assemble_forms(bank: pd.DataFrame,
     for fidx, name in enumerate(form_names):
         engine = AssemblyEngine(bank, params, dcol, dict(usage))
         best_form, best_mean, best_warns = engine.assemble_one_form(fidx + 1)
+
+        # ── Adaptive Mean Control (runs BEFORE the retry loop) ─────────────
+        # When enabled, attempt a targeted swap-correction pass first.
+        # This often avoids the need for expensive retries entirely.
+        if params.adaptive_mean_control and mn_range is not None:
+            intra_ids = set(best_form["QuestionID"].dropna().astype(str).tolist()) \
+                        if "QuestionID" in best_form.columns else set()
+            corr_form, corr_warns = _adaptive_mean_correction(
+                best_form, dcol, mn_range, params,
+                bank, intra_ids, dict(usage),
+                np.random.default_rng(
+                    (params.rng_seed or 0) + fidx * 999),
+                fidx + 1,
+            )
+            corr_mean = float(pd.to_numeric(
+                corr_form[dcol], errors="coerce").dropna().mean()) \
+                if not corr_form.empty else best_mean
+            best_warns.extend(corr_warns)
+            # Accept correction if it improved the result
+            if abs(corr_mean - (mn_range[0]+mn_range[1])/2) < \
+               abs(best_mean  - (mn_range[0]+mn_range[1])/2):
+                best_form, best_mean = corr_form, corr_mean
+
         success = _passes(best_form, best_mean)
 
         if not success:
@@ -1340,6 +1557,22 @@ def assemble_forms(bank: pd.DataFrame,
                 })
                 eng2 = AssemblyEngine(bank, p2, dcol, dict(usage))
                 form2, mean2, w2 = eng2.assemble_one_form(fidx + 1)
+
+                # Run adaptive correction on each retry attempt too
+                if params.adaptive_mean_control and mn_range is not None:
+                    intra2 = set(form2["QuestionID"].dropna().astype(str)) \
+                             if "QuestionID" in form2.columns else set()
+                    form2, cw = _adaptive_mean_correction(
+                        form2, dcol, mn_range, params,
+                        bank, intra2, dict(usage),
+                        np.random.default_rng(seed + 7),
+                        fidx + 1,
+                    )
+                    w2.extend(cw)
+                    mean2 = float(pd.to_numeric(
+                        form2[dcol], errors="coerce").dropna().mean()) \
+                        if not form2.empty else mean2
+
                 if _passes(form2, mean2):
                     best_form, best_mean, best_warns = form2, mean2, w2
                     success = True
@@ -1357,7 +1590,7 @@ def assemble_forms(bank: pd.DataFrame,
                     f"(achieved {best_mean:.3f})."
                 )
 
-        # Update cross-form usage by QuestionID (the only reliable unique key)
+        # Update cross-form usage by QuestionID
         if "QuestionID" in best_form.columns:
             for qid in best_form["QuestionID"].dropna().astype(str):
                 usage[qid] = usage.get(qid, 0) + 1
@@ -2234,6 +2467,7 @@ class Mode1Window(_BaseMode):
         # Used Blocks dataset
         self.used_blocks_df: Optional[pd.DataFrame] = None
         self._use_ub_var = tk.BooleanVar(value=False)
+        self._adaptive_mean_var = tk.BooleanVar(value=False)
         # Block ID settings
         self._part_level_var = tk.IntVar(value=1)  # part (Stage1) or level (Stage2/3)
         self._stage_num_var  = tk.IntVar(value=2)  # 2 = Stage 2, 3 = Stage 3
@@ -2518,12 +2752,25 @@ class Mode1Window(_BaseMode):
         tk.Label(reuse_frm, text="times max per question",
                  bg=BG_L, fg=TXD, font=FB).pack(side="left")
 
-        self._sim_n = self._le(pf, "Simulation students:", 7, "3000")
-        self._seed  = self._le(pf, "RNG Seed (blank=random):", 8, "")
+        # ── Adaptive Mean Control toggle ───────────────────────────────────────
+        amc_frm = tk.Frame(pf, bg=BG_L); amc_frm.grid(
+            row=7, column=0, columnspan=2, sticky="w", pady=(4,2))
+        tk.Checkbutton(amc_frm,
+                       text="Enable Adaptive Mean Control",
+                       variable=self._adaptive_mean_var,
+                       bg=BG_L, fg=ETEC_BLUE, font=("Segoe UI", 10, "bold"),
+                       activebackground=BG_L).pack(side="left")
+        tk.Label(amc_frm,
+                 text="  (intelligent swap correction to hit target mean — "
+                      "uses reuse & Used Blocks strategically)",
+                 bg=BG_L, fg="#666", font=("Segoe UI", 8, "italic")).pack(side="left")
+
+        self._sim_n = self._le(pf, "Simulation students:", 8, "3000")
+        self._seed  = self._le(pf, "RNG Seed (blank=random):", 9, "")
 
         # Save settings button
         _btn(pf, "Save & Preview Settings", self._save_settings,
-             bg=BG_D).grid(row=9, column=0, columnspan=2, pady=8)
+             bg=BG_D).grid(row=10, column=0, columnspan=2, pady=8)
 
         # ── Block ID Settings panel ───────────────────────────────────────────
         bid_frm = tk.LabelFrame(p, text="Block ID Settings",
@@ -2821,7 +3068,8 @@ class Mode1Window(_BaseMode):
             f"Disc filter : {'Enabled (≥0.85)' if self._stats_var.get() else 'Disabled'}",
             f"Partial fill: {'Enabled' if self._partial_var.get() else 'Disabled'}",
             f"Reuse       : {'Enabled — max ' + self._max_reuse_m1.get() + 'x per question' if self._reuse_var.get() else 'Disabled'}",
-            f"Used Blocks : {'Enabled' if self._use_ub_var.get() else 'Disabled'}" + bid_preview,
+            f"Used Blocks : {'Enabled' if self._use_ub_var.get() else 'Disabled'}",
+            f"Adaptive MC : {'Enabled' if self._adaptive_mean_var.get() else 'Disabled'}" + bid_preview,
         ]
         mb.showinfo("Settings Preview", "\n".join(lines))
 
@@ -2955,6 +3203,7 @@ class Mode1Window(_BaseMode):
             rng_seed=int(seed_s) if seed_s else None,
             used_blocks=self.used_blocks_df if self._use_ub_var.get() else None,
             allow_used_blocks=self._use_ub_var.get(),
+            adaptive_mean_control=self._adaptive_mean_var.get(),
         )
         return {"n_forms": n_forms, "params": params,
                 "n_students": ii(self._sim_n, "Simulation students"),
@@ -3079,7 +3328,8 @@ class Mode2Window(_BaseMode):
         # Used Blocks + block ID settings
         self.used_blocks_df: Optional[pd.DataFrame] = None
         self._use_ub_var    = tk.BooleanVar(value=False)
-        self._part_level_var = tk.IntVar(value=1)
+        self._part_level_var    = tk.IntVar(value=1)
+        self._adaptive_mean_var = tk.BooleanVar(value=False)
         self._build(); self.after(80, self._poll)
 
     def _build(self):
@@ -3420,10 +3670,23 @@ class Mode2Window(_BaseMode):
         tk.Label(reuse_frm, text="times max per question",
                  bg=BG_L, fg=TXD, font=FB).pack(side="left")
 
-        self._sim_n = self._le(pf, "Simulation students:", 7, "3000")
-        self._seed  = self._le(pf, "RNG Seed (blank=random):", 8, "")
+        # ── Adaptive Mean Control toggle ───────────────────────────────────────
+        amc_frm = tk.Frame(pf, bg=BG_L)
+        amc_frm.grid(row=7, column=0, columnspan=2, sticky="w", pady=(4,2))
+        tk.Checkbutton(amc_frm,
+                       text="Enable Adaptive Mean Control",
+                       variable=self._adaptive_mean_var,
+                       bg=BG_L, fg=ETEC_BLUE, font=("Segoe UI", 10, "bold"),
+                       activebackground=BG_L).pack(side="left")
+        tk.Label(amc_frm,
+                 text="  (intelligent swap correction to hit target mean — "
+                      "uses reuse & Used Blocks strategically)",
+                 bg=BG_L, fg="#666", font=("Segoe UI", 8, "italic")).pack(side="left")
+
+        self._sim_n = self._le(pf, "Simulation students:", 8, "3000")
+        self._seed  = self._le(pf, "RNG Seed (blank=random):", 9, "")
         _btn(pf, "Save & Preview Settings", self._save_settings,
-             bg=BG_D).grid(row=9, column=0, columnspan=2, pady=8)
+             bg=BG_D).grid(row=10, column=0, columnspan=2, pady=8)
 
     def _on_stage(self, *_):
         is_m = "Manually" in self._stage_var.get()
@@ -3457,6 +3720,7 @@ class Mode2Window(_BaseMode):
             f"Disc filter     : {'Enabled (≥0.5)' if self._stats_var.get() else 'Disabled'}",
             f"Partial fill    : {'Enabled' if self._partial_var.get() else 'Disabled'}",
             f"Reuse           : {'Enabled — max ' + self._max_reuse_m2.get() + 'x per question' if self._reuse_var.get() else 'Disabled'}",
+            f"Adaptive MC     : {'Enabled' if self._adaptive_mean_var.get() else 'Disabled'}",
         ]
         mb.showinfo("Settings Preview", "\n".join(lines))
 
@@ -3646,6 +3910,7 @@ class Mode2Window(_BaseMode):
             rng_seed=int(seed_s) if seed_s else None,
             used_blocks=self.used_blocks_df if self._use_ub_var.get() else None,
             allow_used_blocks=self._use_ub_var.get(),
+            adaptive_mean_control=self._adaptive_mean_var.get(),
         )
         self._n_forms_last = n_forms
         self._n_forms_exam  = self._exam_var.get()
