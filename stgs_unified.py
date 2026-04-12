@@ -157,27 +157,33 @@ def generate_block_ids(exam_name: str,
                        part_or_level: int,    # 1/2 for Stage1 parts; 1/2/3 for difficulty
                        base_dir: Path,
                        used_blocks_df: "Optional[pd.DataFrame]" = None,
+                       stage_override: Optional[int] = None,
                        ) -> list[str]:
     """
     Generate n_forms sequential Block IDs that continue from wherever
     the sequence currently stands.
 
-    Sequencing priority (as specified):
-      1. Scan Used Blocks dataset for the highest existing block number
-         in the same group (e.g. all "GAT-2.1.*" entries).
-         → Next block = max_found + 1
-      2. If no Used Blocks dataset is loaded (or group not found there),
-         read the local persistent JSON counter.
-      3. If neither exists → start from 001.
+    stage_override
+    --------------
+    When stage_name is "E", "M", or "D" the table maps them to Stage 2
+    by default.  Pass stage_override=3 to generate Stage 3 IDs instead
+    (e.g. GAT-3.1.* instead of GAT-2.1.*).  This is the user-facing
+    "Stage Number" radio button in the Block ID Settings panel.
 
-    Returns list like ["GAT-2.1.006", "GAT-2.1.007", …]
-    The JSON counter is always updated after generation so it stays in
-    sync for future runs even without the Used Blocks file.
+    Sequencing priority:
+      1. Scan Used Blocks dataset for the highest existing block number
+         in the same group → next = max_found + 1
+      2. If no Used Blocks loaded (or group not found) → read local JSON
+      3. Neither exists → start from 001
     """
     code    = EXAM_CODES.get(exam_name, "EX")
     sl      = STAGE_TO_SL.get(stage_name, (1, 1))
     stage_n = sl[0]
     level_n = part_or_level if sl[1] == 0 else sl[1]
+
+    # Apply stage override (allows E/M/D to produce Stage 3 IDs)
+    if stage_override is not None and stage_n in (2, 3):
+        stage_n = stage_override
 
     # Canonical key for this exam / stage / level combination
     key = f"{code}-{stage_n}.{level_n}"
@@ -2175,6 +2181,7 @@ class Mode1Window(_BaseMode):
         self._use_ub_var = tk.BooleanVar(value=False)
         # Block ID settings
         self._part_level_var = tk.IntVar(value=1)  # part (Stage1) or level (Stage2/3)
+        self._stage_num_var  = tk.IntVar(value=2)  # 2 = Stage 2, 3 = Stage 3
         self._build(); self.after(80, self._poll)
 
     # ── build ─────────────────────────────────────────────────────────────────
@@ -2517,23 +2524,40 @@ class Mode1Window(_BaseMode):
             rb.pack(anchor="w")
             self._pl_radios.append(rb)
 
+        # ── Stage Number selector (2 or 3) ───────────────────────────────────
+        tk.Label(bid_frm, text="Stage Number:", bg=BG_L,
+                 fg=TXD, font=FB).grid(row=2, column=0, sticky="w", pady=(8, 2))
+        sn_frm = tk.Frame(bid_frm, bg=BG_L); sn_frm.grid(row=2, column=1, sticky="w")
+        self._stage_num_radios: list[tk.Radiobutton] = []
+        for val, lbl in [(2, "Stage 2"), (3, "Stage 3")]:
+            rb = tk.Radiobutton(sn_frm, text=lbl,
+                                variable=self._stage_num_var, value=val,
+                                bg=BG_L, fg=TXD, font=FB, activebackground=BG_L,
+                                command=self._refresh_block_preview)
+            rb.pack(side="left", padx=(0, 12))
+            self._stage_num_radios.append(rb)
+        self._stage_num_note = tk.Label(sn_frm, text="",
+                                        bg=BG_L, fg=ETEC_PURPLE,
+                                        font=("Segoe UI", 8, "italic"))
+        self._stage_num_note.pack(side="left")
+
         # ── Preview + counter info ─────────────────────────────────────────────
         tk.Label(bid_frm, text="Block ID Preview:", bg=BG_L,
-                 fg=TXD, font=FB).grid(row=2, column=0, sticky="nw", pady=(8, 2))
+                 fg=TXD, font=FB).grid(row=3, column=0, sticky="nw", pady=(8, 2))
         self._bid_preview = tk.Text(bid_frm, height=5, width=24,
                                     bg="#F0F4FF", fg=ETEC_NAVY,
                                     font=("Consolas", 9), state="disabled",
                                     relief="solid", bd=1)
-        self._bid_preview.grid(row=2, column=1, sticky="w", pady=(8, 2))
+        self._bid_preview.grid(row=3, column=1, sticky="w", pady=(8, 2))
 
         self._bid_counter_lbl = tk.Label(bid_frm, text="",
                                          bg=BG_L, fg=ETEC_TEAL,
                                          font=("Segoe UI", 8, "italic"))
-        self._bid_counter_lbl.grid(row=3, column=0, columnspan=2, sticky="w")
+        self._bid_counter_lbl.grid(row=4, column=0, columnspan=2, sticky="w")
 
         _btn(bid_frm, "↺ Reset Counter",
              lambda: self._reset_block_counter(), bg=ETEC_PURPLE).grid(
-            row=4, column=0, columnspan=2, pady=4)
+            row=5, column=0, columnspan=2, pady=4)
 
         # Set correct initial labels
         self._update_level_radio_labels()
@@ -2594,41 +2618,54 @@ class Mode1Window(_BaseMode):
 
     def _update_level_radio_labels(self):
         """
-        Retitle the three radio buttons based on which stage is selected:
-          Stage 1  → Part 1 / Part 2 / (greyed out)
-          Stage 2  → Easy (2.1) / Medium (2.2) / Difficult (2.3)
-          Stage 3  → Easy (3.1) / Medium (3.2) / Difficult (3.3)
-          E/M/D    → level is fixed — show which one is active
+        Retitle the level radio buttons and update the Stage Number row
+        based on which difficulty stage is currently selected.
+
+        Stage1      → level = Part 1 or Part 2 (stage number row hidden)
+        E / M / D   → level is fixed by the difficulty choice;
+                       Stage Number row enabled → user picks Stage 2 or 3
+        Manually set → user picks both level and stage number freely
         """
         stage = self._stage_var.get() if hasattr(self, "_stage_var") else "Stage1"
         sl    = STAGE_TO_SL.get(stage, (1, 0))
-        stage_n = sl[0]
+        stage_n   = sl[0]
+        fixed_lvl = sl[1]   # 0 = user must pick; non-zero = fixed by stage choice
 
-        if stage_n == 1:  # Stage1 — parts
-            labels    = ["Part 1  (1.1)", "Part 2  (1.2)", "—  (n/a)"]
-            disabled  = [False, False, True]
-        elif stage_n == 2:
-            labels    = ["Easy  (2.1)", "Medium  (2.2)", "Difficult  (2.3)"]
-            disabled  = [False, False, False]
-        else:  # stage_n == 3
-            labels    = ["Easy  (3.1)", "Medium  (3.2)", "Difficult  (3.3)"]
-            disabled  = [False, False, False]
+        # ── Level / Part radio labels ──────────────────────────────────────────
+        if stage_n == 1:
+            labels   = ["Part 1  (1.1)", "Part 2  (1.2)", "—  (n/a)"]
+            disabled = [False, False, True]
+        else:
+            # Stage 2 or 3 — level names are the same; stage nr shows in preview
+            sn = self._stage_num_var.get() if hasattr(self, "_stage_num_var") else 2
+            labels   = [f"Easy  ({sn}.1)", f"Medium  ({sn}.2)", f"Difficult  ({sn}.3)"]
+            disabled = [False, False, False]
 
-        # Also lock the selector when the stage already encodes the level
-        # (E → level always 1, M → always 2, D → always 3)
-        fixed_level = sl[1] if sl[1] != 0 else None
-
-        for i, (rb, lbl, dis) in enumerate(
-                zip(self._pl_radios, labels, disabled)):
+        for rb, lbl, dis in zip(self._pl_radios, labels, disabled):
             rb.config(text=lbl)
-            if fixed_level is not None:
-                # Level is determined by the stage choice — disable all
+            if fixed_lvl != 0:
+                # Level is already encoded by the difficulty stage (E/M/D)
                 rb.config(state="disabled")
-                self._part_level_var.set(fixed_level)
+                self._part_level_var.set(fixed_lvl)
             elif dis:
                 rb.config(state="disabled")
             else:
                 rb.config(state="normal")
+
+        # ── Stage Number row (2 vs 3) ──────────────────────────────────────────
+        if hasattr(self, "_stage_num_radios"):
+            if stage_n == 1:
+                # Stage1 always generates 1.x IDs — stage number row irrelevant
+                for rb in self._stage_num_radios:
+                    rb.config(state="disabled")
+                self._stage_num_note.config(text="(fixed: Stage 1)")
+            else:
+                # E, M, D, Manually set — user can choose Stage 2 or Stage 3
+                for rb in self._stage_num_radios:
+                    rb.config(state="normal")
+                sn = self._stage_num_var.get()
+                note = f"→ IDs will be {EXAM_CODES.get(self._exam_var.get(),'EX')}-{sn}.x.xxx"
+                self._stage_num_note.config(text=note)
 
     def _refresh_block_preview(self):
         """Update the Block ID preview text box and counter label."""
@@ -2646,6 +2683,9 @@ class Mode1Window(_BaseMode):
         sl    = STAGE_TO_SL.get(stage, (1, 1))
         stage_n = sl[0]
         level_n = pl if sl[1] == 0 else sl[1]
+        # Apply stage override for E/M/D → Stage 2 or Stage 3
+        if stage_n in (2, 3) and hasattr(self, "_stage_num_var"):
+            stage_n = self._stage_num_var.get()
         key   = f"{code}-{stage_n}.{level_n}"
 
         # What is the current high-water mark?
@@ -2679,6 +2719,9 @@ class Mode1Window(_BaseMode):
         sl    = STAGE_TO_SL.get(stage, (1, 1))
         stage_n = sl[0]
         level_n = pl if sl[1] == 0 else sl[1]
+        # Apply stage override
+        if stage_n in (2, 3) and hasattr(self, "_stage_num_var"):
+            stage_n = self._stage_num_var.get()
         key   = f"{code}-{stage_n}.{level_n}"
         counters = _load_counters(self.source_path.parent)
         if key in counters:
@@ -2712,6 +2755,8 @@ class Mode1Window(_BaseMode):
         lines = [
             f"Exam        : {exam}",
             f"Stage       : {stage}",
+            f"Stage Number: {self._stage_num_var.get()} "
+            f"({'active' if STAGE_TO_SL.get(stage,(1,0))[0] in (2,3) else 'n/a for Stage1'})",
             f"Part/Level  : {pl}",
             f"Diff Range  : {crit.get('Range', 'manual')}",
             f"Mean Target : {crit.get('Mean', 'manual')}",
@@ -2861,7 +2906,8 @@ class Mode1Window(_BaseMode):
                 "seed": int(seed_s) if seed_s else None,
                 "exam": self._exam_var.get(),
                 "stage": self._stage_var.get(),
-                "part_level": self._part_level_var.get()}
+                "part_level": self._part_level_var.get(),
+                "stage_override": self._stage_num_var.get()}
 
     def _gen_t(self, p, active_bank):
         try:
@@ -2871,7 +2917,8 @@ class Mode1Window(_BaseMode):
                 names = generate_block_ids(
                     p["exam"], p["stage"], n,
                     p["part_level"], self.source_path.parent,
-                    self.used_blocks_df)
+                    self.used_blocks_df,
+                    stage_override=p.get("stage_override"))
             else:
                 names = [f"Form_{i+1}" for i in range(n)]
             bank_label = ("unused-only" if self._bank_option.get() == 2
