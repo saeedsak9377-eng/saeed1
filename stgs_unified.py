@@ -59,6 +59,171 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("stgs")
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  BLOCK ID SYSTEM
+# ─────────────────────────────────────────────────────────────────────────────
+# Format:  <ExamCode>-<Stage>.<Level>.<BlockNumber:03d>
+#
+# Stage 1:  level = 1 (Part 1) or 2 (Part 2)   → GAT-1.1.001 / GAT-1.2.001
+# Stage 2:  level = 1 Easy / 2 Medium / 3 Hard  → GAT-2.1.001
+# Stage 3:  level = 1 Easy / 2 Medium / 3 Hard  → GAT-3.1.001
+
+EXAM_CODES: dict[str, str] = {
+    "قدرات علمي":      "GAT",
+    "قدرات نظري":      "NLAT",
+    "القدرة المعرفية": "CAT",
+    "التحصيلي":        "ACH",
+    "قدرات الجامعيين": "GGAT",
+    "Custom":           "EX",
+    # Mode 2 default code
+    "نافس 4 أسئلة":   "NAF4",
+    "نافس 5 أسئلة":   "NAF5",
+}
+
+# Maps (stage_name_in_UI) → (stage_number, level_number)
+# Used to derive the numeric stage.level for the block ID
+STAGE_TO_SL: dict[str, tuple[int, int]] = {
+    # Mode 1
+    "Stage1":       (1, 0),   # 0 = Part selector required (1 or 2)
+    "E":            (2, 1),
+    "M":            (2, 2),
+    "D":            (2, 3),
+    "Manually set": (3, 0),   # 0 = difficulty-level selector required
+    # Mode 2
+    "علوم صف الثالث":         (2, 1),
+    "علوم صف السادس":         (2, 2),
+    "علوم الصف التاسع":       (2, 3),
+    "الرياضيات الصف الثالث":  (2, 1),
+    "الرياضيات الصف السادس":  (2, 2),
+    "الرياضيات الصف التاسع":  (2, 3),
+    "القراءة الصف الثالث":    (2, 1),
+    "القراءة الصف السادس":    (2, 2),
+    "القراءة الصف التاسع":    (2, 3),
+    "عام":                    (1, 1),
+}
+
+_BLOCK_COUNTER_FILE = ".stgs_block_counters.json"
+
+
+def _load_counters(base_dir: Path) -> dict:
+    """Load persistent block counters from JSON file next to the bank."""
+    fpath = base_dir / _BLOCK_COUNTER_FILE
+    if fpath.exists():
+        try:
+            import json
+            return json.loads(fpath.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _save_counters(base_dir: Path, counters: dict) -> None:
+    import json
+    fpath = base_dir / _BLOCK_COUNTER_FILE
+    fpath.write_text(json.dumps(counters, ensure_ascii=False, indent=2),
+                     encoding="utf-8")
+
+
+def generate_block_ids(exam_name: str,
+                       stage_name: str,
+                       n_forms: int,
+                       part_or_level: int,   # 1/2 for Stage1 parts; 1/2/3 for difficulty
+                       base_dir: Path,
+                       ) -> list[str]:
+    """
+    Generate n_forms sequential block IDs and persist the counter.
+
+    Returns list of strings like ["GAT-1.1.001", "GAT-1.1.002", …]
+    """
+    code    = EXAM_CODES.get(exam_name, "EX")
+    sl      = STAGE_TO_SL.get(stage_name, (1, 1))
+    stage_n = sl[0]
+    level_n = part_or_level if sl[1] == 0 else sl[1]
+
+    # Counter key uniquely identifies this stage.level combination
+    key = f"{code}-{stage_n}.{level_n}"
+
+    counters = _load_counters(base_dir)
+    start    = counters.get(key, 0) + 1
+
+    ids: list[str] = []
+    for i in range(n_forms):
+        ids.append(f"{key}.{start + i:03d}")
+
+    counters[key] = start + n_forms - 1
+    _save_counters(base_dir, counters)
+    return ids
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  USED BLOCKS LOADER
+# ─────────────────────────────────────────────────────────────────────────────
+
+UB_ALIASES = {
+    "QuestionID":   ["questionid","qoustionid","question_id","id","رقم"],
+    "Block-ID":     ["block-id","block_id","blockid","block id","block"],
+    "Difficulty":   ["difficulty","الصعوبة","b","difficulty"],
+    "Category":     ["category","الفئة","التصنيف","الناتج"],
+    "Number of used": ["number of used","عدد مرات استخدام السؤال","used_count",
+                       "usage","used","استخدام"],
+    "D":            ["d","domain","المجال"],
+    "Discrimination": ["تمييز","discrimination","a"],
+    "مستوى التمييز":  ["مستوى التمييز","level","مستوى"],
+    "Guessing":     ["التخمين","التخميين","guessing","c"],
+}
+
+
+def load_used_blocks(path: str | Path) -> pd.DataFrame:
+    """
+    Load the Used Blocks dataset.
+    Normalises column names and ensures 'Number of used' is numeric.
+    Returns an empty DataFrame if the file cannot be read.
+    """
+    path = Path(path)
+    try:
+        if path.suffix.lower() in (".xlsx", ".xls"):
+            df = pd.read_excel(path, engine="openpyxl")
+        else:
+            df = pd.read_csv(path, encoding="utf-8-sig")
+    except Exception as exc:
+        log.warning("Could not load Used Blocks file: %s", exc)
+        return pd.DataFrame()
+
+    # Normalise columns
+    lower = {c.strip().lower(): c for c in df.columns}
+    rename = {}
+    for canon, alts in UB_ALIASES.items():
+        if canon in df.columns:
+            continue
+        for a in alts:
+            if a.strip().lower() in lower:
+                rename[lower[a.strip().lower()]] = canon
+                break
+    df = df.rename(columns=rename)
+
+    if "QuestionID" not in df.columns:
+        log.warning("Used Blocks file has no QuestionID column — ignored.")
+        return pd.DataFrame()
+
+    if "Number of used" not in df.columns:
+        df["Number of used"] = 0
+    else:
+        df["Number of used"] = pd.to_numeric(df["Number of used"],
+                                              errors="coerce").fillna(0)
+
+    # Ensure Difficulty column exists
+    if "Difficulty" not in df.columns and "difficulty" in df.columns:
+        df["Difficulty"] = df["difficulty"]
+    if "Difficulty" not in df.columns:
+        df["Difficulty"] = 0.5
+
+    df["Difficulty"] = pd.to_numeric(df["Difficulty"],
+                                     errors="coerce").fillna(0.5).clip(0, 1)
+    df = df[~df["QuestionID"].duplicated(keep="first")].reset_index(drop=True)
+    log.info("Used Blocks loaded: %d questions", len(df))
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -355,6 +520,9 @@ class AssemblyParams:
     max_reuse:          int  = 3
     max_retries:        int  = 100
     rng_seed:           Optional[int] = None
+    # Used Blocks fallback (5th priority — last resort)
+    used_blocks:        Optional["pd.DataFrame"] = field(default=None)
+    allow_used_blocks:  bool = False
 
 
 def _pick_stratified_with_quota(
@@ -851,8 +1019,109 @@ class AssemblyEngine:
                         sel["QuestionID"].dropna().astype(str))
 
         form = pd.concat(form_parts, ignore_index=True) if form_parts else pd.DataFrame()
-        # Drop helper columns before returning
         form = form.drop(columns=["_slot_label"], errors="ignore")
+
+        # ── Used Blocks fallback (5th priority — absolute last resort) ─────────
+        # Triggered only when:
+        #   (a) allow_used_blocks is True in params
+        #   (b) the form is short of its required total
+        #   (c) a non-empty used_blocks DataFrame was provided
+        p = self.params
+        if (p.allow_used_blocks and
+                p.used_blocks is not None and
+                not p.used_blocks.empty):
+
+            # Compute actual vs required totals per slot
+            total_required = sum(s.count for s in p.slots)
+            got_ids  = set(form["QuestionID"].dropna().astype(str).tolist()) \
+                       if "QuestionID" in form.columns else set()
+            shortfall = total_required - len(got_ids)
+
+            if shortfall > 0:
+                # Build slot quotas still missing
+                for slot in p.slots:
+                    # Count how many items for this slot were already assembled
+                    if "Category" in form.columns:
+                        cat_col = "Category"
+                    elif "الناتج" in form.columns:
+                        cat_col = "الناتج"
+                    else:
+                        cat_col = None
+
+                    got_slot = 0
+                    if cat_col and cat_col in form.columns:
+                        got_slot = (form[cat_col] == slot.label).sum()
+                    need_more = max(slot.count - got_slot, 0)
+
+                    if need_more <= 0:
+                        continue
+
+                    # Pull from Used Blocks: filter by category, diff range,
+                    # exclude this-form IDs, sort by least-used first
+                    ub = p.used_blocks.copy()
+
+                    # Exclude already in this form
+                    if "QuestionID" in ub.columns:
+                        ub = ub[~ub["QuestionID"].astype(str).isin(intra_form_used_ids)]
+
+                    # Filter by category if column exists
+                    if "Category" in ub.columns and slot.label:
+                        ub_cat = ub[ub["Category"].astype(str) == str(slot.label)]
+                        if ub_cat.empty:
+                            ub_cat = ub   # relax category filter
+                    else:
+                        ub_cat = ub
+
+                    # Filter by difficulty range
+                    dcol_ub = "Difficulty" if "Difficulty" in ub_cat.columns else self.dcol
+                    if dcol_ub in ub_cat.columns:
+                        lo, hi = p.diff_range
+                        ub_cat = ub_cat[
+                            (pd.to_numeric(ub_cat[dcol_ub], errors="coerce") >= lo) &
+                            (pd.to_numeric(ub_cat[dcol_ub], errors="coerce") <= hi)
+                        ]
+
+                    if ub_cat.empty:
+                        ub_cat = ub   # relax all filters
+
+                    if ub_cat.empty:
+                        all_warnings.append(
+                            f"Form {form_number}: Used Blocks also exhausted for "
+                            f"'{slot.label}' — {need_more} placeholders added.")
+                        continue
+
+                    # Sort by Number of used ascending (least-used first)
+                    if "Number of used" in ub_cat.columns:
+                        ub_cat = ub_cat.sort_values("Number of used",
+                                                     ascending=True)
+                    else:
+                        ub_cat = ub_cat.copy()
+
+                    # Rename columns to match main bank schema if needed
+                    if self.dcol not in ub_cat.columns and dcol_ub in ub_cat.columns:
+                        ub_cat = ub_cat.rename(columns={dcol_ub: self.dcol})
+
+                    top = ub_cat.head(need_more).copy()
+                    top["_form"] = form_number
+                    top["_source"] = "Used Blocks"
+
+                    ub_picked = list(top["QuestionID"].dropna().astype(str))
+                    intra_form_used_ids.update(ub_picked)
+                    form_parts.append(top)
+
+                    all_warnings.append(
+                        f"Form {form_number}: {len(top)} question(s) for "
+                        f"'{slot.label}' taken from Used Blocks "
+                        f"(least-used first).")
+                    log.info("Used Blocks fallback: %d items for '%s' in form %d",
+                             len(top), slot.label, form_number)
+
+                # Rebuild form with the fallback rows added
+                form = pd.concat(form_parts, ignore_index=True) if form_parts \
+                       else pd.DataFrame()
+                form = form.drop(columns=["_slot_label", "_source"],
+                                 errors="ignore")
+
         difficulties = pd.to_numeric(form[self.dcol], errors="coerce").dropna().tolist()
         mean_d = float(np.mean(difficulties)) if difficulties else 0.0
         return form, mean_d, all_warnings
@@ -1764,6 +2033,16 @@ class _BaseMode(tk.Toplevel):
                 item = self._q.get_nowait(); k = item[0]
                 if k == "bank":
                     self._on_bank(item[1], item[2])
+                    if hasattr(self, "_refresh_block_preview"):
+                        self._refresh_block_preview()
+                elif k == "ub_loaded":
+                    self.used_blocks_df = item[1]
+                    ub_path = item[2]
+                    n_ub = len(item[1])
+                    self._ub_path_var.set(Path(ub_path).name)
+                    self._ub_stats_lbl.config(
+                        text=f"  {n_ub} questions loaded from Used Blocks file")
+                    self._sv.set(f"Used Blocks loaded: {n_ub} questions")
                 elif k == "log":
                     _append_log(self._logbox, item[1], item[2] if len(item) > 2 else "")
                 elif k == "prog":
@@ -1840,6 +2119,11 @@ class Mode1Window(_BaseMode):
         # Cumulative set of QuestionIDs used across ALL generation runs this session
         self._used_qids: set[str] = set()
         self._bank_option = tk.IntVar(value=1)   # 1=full, 2=unused only
+        # Used Blocks dataset
+        self.used_blocks_df: Optional[pd.DataFrame] = None
+        self._use_ub_var = tk.BooleanVar(value=False)
+        # Block ID settings
+        self._part_level_var = tk.IntVar(value=1)  # part (Stage1) or level (Stage2/3)
         self._build(); self.after(80, self._poll)
 
     # ── build ─────────────────────────────────────────────────────────────────
@@ -1937,11 +2221,50 @@ class Mode1Window(_BaseMode):
         tk.Label(p, textvariable=self._bstats, bg=BG_L, fg=BG_M,
                  font=FB, justify="left").pack(anchor="w", pady=4)
 
+        # ── Used Blocks dataset ──────────────────────────────────────────────
+        ub_frm = tk.LabelFrame(p, text="Used Blocks Dataset  (optional fallback)",
+                               bg=BG_L, fg=BG_D, font=FH, padx=10, pady=8)
+        ub_frm.pack(fill="x", pady=(6, 4))
+
+        ub_row = tk.Frame(ub_frm, bg=BG_L); ub_row.pack(fill="x")
+        self._ub_path_var = tk.StringVar(value="No file selected")
+        tk.Label(ub_row, textvariable=self._ub_path_var,
+                 bg=BG_L, fg=BG_D, font=FB, width=42, anchor="w").pack(side="left")
+        _btn(ub_row, "Upload Used Blocks", self._browse_used_blocks,
+             bg=ETEC_PURPLE).pack(side="left", padx=8)
+
+        ub_ctrl = tk.Frame(ub_frm, bg=BG_L); ub_ctrl.pack(fill="x", pady=(6,0))
+        tk.Checkbutton(ub_ctrl,
+                       text="Allow reuse from Used Blocks if main bank is exhausted  "
+                            "(last resort — sorted by least used first)",
+                       variable=self._use_ub_var,
+                       bg=BG_L, fg=TXD, font=FB,
+                       activebackground=BG_L).pack(side="left")
+        self._ub_stats_lbl = tk.Label(ub_frm, text="",
+                                      bg=BG_L, fg=ETEC_PURPLE,
+                                      font=("Segoe UI", 9, "italic"))
+        self._ub_stats_lbl.pack(anchor="w")
+
         _lbl(p, "Categories detected in 'Category' column", bold=True).pack(
             anchor="w", pady=(10, 4))
         self._cat_tree = _treeview(p,
             ["Category","Domain (D)","Count","Mean Difficulty","Min","Max"],
             [160, 140, 60, 120, 65, 65])
+
+    def _browse_used_blocks(self):
+        path = fd.askopenfilename(
+            title="Select Used Blocks File",
+            filetypes=[("Excel/CSV","*.xlsx *.xls *.csv"),("All","*.*")])
+        if not path: return
+        self._sv.set("Loading Used Blocks…")
+        threading.Thread(target=self._load_ub_t, args=(path,), daemon=True).start()
+
+    def _load_ub_t(self, path):
+        try:
+            df = load_used_blocks(path)
+            self._q.put(("ub_loaded", df, path))
+        except Exception as e:
+            self._q.put(("err", str(e)))
 
     def _on_bank_option(self):
         """Called when the user switches between Option 1 / Option 2."""
@@ -2089,6 +2412,32 @@ class Mode1Window(_BaseMode):
         _btn(pf, "Save & Preview Settings", self._save_settings,
              bg=BG_D).grid(row=9, column=0, columnspan=2, pady=8)
 
+        # ── Block ID panel ────────────────────────────────────────────────────
+        bid_frm = tk.LabelFrame(p, text="Block ID Settings",
+                                bg=BG_L, fg=BG_D, font=FH, padx=10, pady=8)
+        bid_frm.grid(row=0, column=2, sticky="nsew", padx=(8, 0), pady=4)
+        p.columnconfigure(2, weight=1)
+
+        tk.Label(bid_frm, text="Part / Difficulty Level:", bg=BG_L,
+                 fg=TXD, font=FB).grid(row=0, column=0, sticky="w", pady=2)
+        pl_frm = tk.Frame(bid_frm, bg=BG_L); pl_frm.grid(row=0, column=1, sticky="w")
+        for val, text in [(1,"Part 1 / Easy"),(2,"Part 2 / Medium"),(3,"Hard")]:
+            tk.Radiobutton(pl_frm, text=text, variable=self._part_level_var,
+                           value=val, bg=BG_L, fg=TXD, font=FB,
+                           activebackground=BG_L,
+                           command=self._refresh_block_preview).pack(anchor="w")
+
+        tk.Label(bid_frm, text="Block ID Preview:", bg=BG_L,
+                 fg=TXD, font=FB).grid(row=1, column=0, sticky="nw", pady=(8,2))
+        self._bid_preview = tk.Text(bid_frm, height=6, width=24,
+                                    bg="#F0F4FF", fg=ETEC_NAVY,
+                                    font=("Consolas", 9), state="disabled",
+                                    relief="solid", bd=1)
+        self._bid_preview.grid(row=1, column=1, sticky="w", pady=(8,2))
+        _btn(bid_frm, "↺ Reset Counter",
+             lambda: self._reset_block_counter(), bg=ETEC_PURPLE).grid(
+            row=2, column=0, columnspan=2, pady=4)
+
         # Manual bins
         bf = tk.LabelFrame(p, text="Manual Difficulty Bins (0.0 → 1.0)  — optional",
                            bg=BG_L, fg=BG_D, font=FH, padx=10, pady=8)
@@ -2140,6 +2489,43 @@ class Mode1Window(_BaseMode):
             self._rng_lbl.config(text=""); self._rng_ent.config(state="disabled")
             self._mean_lbl.config(text=""); self._mean_ent.config(state="disabled")
 
+    def _refresh_block_preview(self):
+        """Update the Block ID preview text box based on current settings."""
+        if self.source_path is None:
+            return
+        try:
+            n = int(self._nforms.get())
+        except ValueError:
+            n = 1
+        exam  = self._exam_var.get()
+        stage = self._stage_var.get()
+        pl    = self._part_level_var.get()
+        ids   = generate_block_ids(exam, stage, n,
+                                    pl, self.source_path.parent)
+        self._bid_preview.config(state="normal")
+        self._bid_preview.delete("1.0", "end")
+        self._bid_preview.insert("end", "\n".join(ids))
+        self._bid_preview.config(state="disabled")
+
+    def _reset_block_counter(self):
+        """Clear the persisted counter for the current exam/stage/level."""
+        if self.source_path is None:
+            mb.showinfo("Info", "Upload a bank file first."); return
+        exam  = self._exam_var.get()
+        stage = self._stage_var.get()
+        pl    = self._part_level_var.get()
+        code  = EXAM_CODES.get(exam, "EX")
+        sl    = STAGE_TO_SL.get(stage, (1, 1))
+        stage_n = sl[0]
+        level_n = pl if sl[1] == 0 else sl[1]
+        key   = f"{code}-{stage_n}.{level_n}"
+        counters = _load_counters(self.source_path.parent)
+        if key in counters:
+            counters.pop(key)
+            _save_counters(self.source_path.parent, counters)
+        mb.showinfo("Reset", f"Counter for '{key}' has been reset to 0.")
+        self._refresh_block_preview()
+
     def _save_settings(self):
         """Preview / confirm current settings (mirrors save_settings() from Script 1)."""
         try:
@@ -2149,11 +2535,22 @@ class Mode1Window(_BaseMode):
         stage = self._stage_var.get()
         crit  = MODE1_STAGES.get(stage, {})
         exam  = self._exam_var.get()
+        pl    = self._part_level_var.get()
         total = sum(int(e.get()) for _, e in self._sub_rows
                     if e.get().isdigit())
+        # Preview next block IDs
+        bid_preview = ""
+        if self.source_path:
+            try:
+                ids = generate_block_ids(exam, stage, min(n_forms, 3),
+                                         pl, self.source_path.parent)
+                bid_preview = f"\nBlock IDs   : {ids[0]} … {ids[-1]}"
+            except Exception:
+                pass
         lines = [
             f"Exam        : {exam}",
             f"Stage       : {stage}",
+            f"Part/Level  : {pl}",
             f"Diff Range  : {crit.get('Range', 'manual')}",
             f"Mean Target : {crit.get('Mean', 'manual')}",
             f"Forms       : {n_forms}",
@@ -2162,6 +2559,7 @@ class Mode1Window(_BaseMode):
             f"Disc filter : {'Enabled (≥0.85)' if self._stats_var.get() else 'Disabled'}",
             f"Partial fill: {'Enabled' if self._partial_var.get() else 'Disabled'}",
             f"Reuse       : {'Enabled — max ' + self._max_reuse_m1.get() + 'x per question' if self._reuse_var.get() else 'Disabled'}",
+            f"Used Blocks : {'Enabled' if self._use_ub_var.get() else 'Disabled'}" + bid_preview,
         ]
         mb.showinfo("Settings Preview", "\n".join(lines))
 
@@ -2293,19 +2691,31 @@ class Mode1Window(_BaseMode):
             max_reuse=max_reuse_val,
             max_retries=100,
             rng_seed=int(seed_s) if seed_s else None,
+            used_blocks=self.used_blocks_df if self._use_ub_var.get() else None,
+            allow_used_blocks=self._use_ub_var.get(),
         )
         return {"n_forms": n_forms, "params": params,
                 "n_students": ii(self._sim_n, "Simulation students"),
-                "seed": int(seed_s) if seed_s else None}
+                "seed": int(seed_s) if seed_s else None,
+                "exam": self._exam_var.get(),
+                "stage": self._stage_var.get(),
+                "part_level": self._part_level_var.get()}
 
     def _gen_t(self, p, active_bank):
         try:
             n = p["n_forms"]; params = p["params"]
-            names = [f"Form_{i+1}" for i in range(n)]
+            # Generate block IDs (persisted counter)
+            if self.source_path:
+                names = generate_block_ids(
+                    p["exam"], p["stage"], n,
+                    p["part_level"], self.source_path.parent)
+            else:
+                names = [f"Form_{i+1}" for i in range(n)]
             bank_label = ("unused-only" if self._bank_option.get() == 2
                           else "full bank")
             self._lg(f"Starting assembly: {n} forms  [{bank_label}, "
                      f"{len(active_bank)} questions]…")
+            self._lg(f"  Block IDs: {names[0]} … {names[-1]}", ETEC_TEAL)
             results = assemble_forms(active_bank, params, "Difficulty", n, names)
             self._q.put(("prog", 40))
             for (form, mean_d, warns), name in zip(results, names):
@@ -2325,9 +2735,11 @@ class Mode1Window(_BaseMode):
                              f"Item Corr. = {fa.item_corr:.3f}")
 
             self._lg("Writing output files…")
-            exam_type = self._exam_var.get()
-            out_dir   = _make_output_folder(
-                self.source_path.parent, exam_type, n)
+            exam_type  = self._exam_var.get()
+            # Include block ID range in folder name for traceability
+            folder_tag = f"{exam_type}  [{names[0]}…{names[-1]}]"
+            out_dir    = _make_output_folder(
+                self.source_path.parent, folder_tag, n)
             self._last_out_dir = out_dir   # for Open Folder button
             fp = out_dir / "Forms.xlsx"
             ap = out_dir / "3PL_Analysis.xlsx"
@@ -2399,6 +2811,10 @@ class Mode2Window(_BaseMode):
         self._bins_map:   dict[str, list] = {}
         self._used_qids:  set[str] = set()
         self._bank_option = tk.IntVar(value=1)
+        # Used Blocks + block ID settings
+        self.used_blocks_df: Optional[pd.DataFrame] = None
+        self._use_ub_var    = tk.BooleanVar(value=False)
+        self._part_level_var = tk.IntVar(value=1)
         self._build(); self.after(80, self._poll)
 
     def _build(self):
@@ -2486,6 +2902,26 @@ class Mode2Window(_BaseMode):
                                     font=("Segoe UI", 9, "italic"))
         self._unused_lbl.pack(side="left")
 
+        # ── Used Blocks dataset ──────────────────────────────────────────────
+        ub_frm = tk.LabelFrame(p, text="Used Blocks Dataset  (optional fallback)",
+                               bg=BG_L, fg=BG_D, font=FH, padx=10, pady=8)
+        ub_frm.pack(fill="x", pady=(6, 4))
+        ub_row = tk.Frame(ub_frm, bg=BG_L); ub_row.pack(fill="x")
+        self._ub_path_var = tk.StringVar(value="No file selected")
+        tk.Label(ub_row, textvariable=self._ub_path_var,
+                 bg=BG_L, fg=BG_D, font=FB, width=42, anchor="w").pack(side="left")
+        _btn(ub_row, "Upload Used Blocks", self._browse_used_blocks,
+             bg=ETEC_PURPLE).pack(side="left", padx=8)
+        ub_ctrl = tk.Frame(ub_frm, bg=BG_L); ub_ctrl.pack(fill="x", pady=(6,0))
+        tk.Checkbutton(ub_ctrl,
+                       text="Allow reuse from Used Blocks if main bank is exhausted",
+                       variable=self._use_ub_var,
+                       bg=BG_L, fg=TXD, font=FB, activebackground=BG_L).pack(side="left")
+        self._ub_stats_lbl = tk.Label(ub_frm, text="",
+                                      bg=BG_L, fg=ETEC_PURPLE,
+                                      font=("Segoe UI", 9, "italic"))
+        self._ub_stats_lbl.pack(anchor="w")
+
         self._bstats = tk.StringVar(value="")
         tk.Label(p, textvariable=self._bstats, bg=BG_L, fg=BG_M,
                  font=FB, justify="left").pack(anchor="w", pady=4)
@@ -2525,6 +2961,19 @@ class Mode2Window(_BaseMode):
     def _load_t(self, path):
         try:
             df = load_bank_mode2(path); self._q.put(("bank", df, path))
+        except Exception as e: self._q.put(("err", str(e)))
+
+    def _browse_used_blocks(self):
+        path = fd.askopenfilename(
+            title="Select Used Blocks File",
+            filetypes=[("Excel/CSV","*.xlsx *.xls *.csv"),("All","*.*")])
+        if not path: return
+        self._sv.set("Loading Used Blocks…")
+        threading.Thread(target=self._load_ub_t, args=(path,), daemon=True).start()
+
+    def _load_ub_t(self, path):
+        try:
+            df = load_used_blocks(path); self._q.put(("ub_loaded", df, path))
         except Exception as e: self._q.put(("err", str(e)))
 
     def _on_bank_option(self):
@@ -2930,15 +3379,29 @@ class Mode2Window(_BaseMode):
             max_reuse=max_reuse_val,
             max_retries=100,
             rng_seed=int(seed_s) if seed_s else None,
+            used_blocks=self.used_blocks_df if self._use_ub_var.get() else None,
+            allow_used_blocks=self._use_ub_var.get(),
         )
         self._n_forms_last = n_forms
+        self._n_forms_exam  = self._exam_var.get()
+        self._n_forms_stage = self._stage_var.get()
+        self._n_forms_pl    = self._part_level_var.get()
         return params, dcol
 
     def _gen_t(self, df, params, dcol, bank_label="full bank"):
         try:
             n = self._n_forms_last
-            names = [f"Form_{i+1}" for i in range(n)]
+            # Generate block IDs for Mode 2 as well
+            exam  = getattr(self, "_n_forms_exam",  self._exam_var.get())
+            stage = getattr(self, "_n_forms_stage", self._stage_var.get())
+            pl    = getattr(self, "_n_forms_pl",    self._part_level_var.get())
+            if self.source_path:
+                names = generate_block_ids(exam, stage, n, pl,
+                                           self.source_path.parent)
+            else:
+                names = [f"Form_{i+1}" for i in range(n)]
             self._lg(f"Starting assembly: {n} forms  [{bank_label}, {len(df)} questions]…")
+            self._lg(f"  Block IDs: {names[0]} … {names[-1]}", ETEC_TEAL)
             results = assemble_forms(df, params, dcol, n, names)
             self._q.put(("prog", 40))
 
@@ -2959,9 +3422,10 @@ class Mode2Window(_BaseMode):
                              f"Item Corr. = {fa.item_corr:.3f}")
 
             self._lg("Writing output files…")
-            exam_type = self._exam_var.get()
-            out_dir   = _make_output_folder(
-                self.source_path.parent, exam_type, n)
+            exam_type  = self._exam_var.get()
+            folder_tag = f"{exam_type}  [{names[0]}…{names[-1]}]"
+            out_dir    = _make_output_folder(
+                self.source_path.parent, folder_tag, n)
             self._last_out_dir = out_dir
             fp = out_dir / "Forms.xlsx"
             ap = out_dir / "3PL_Analysis.xlsx"
