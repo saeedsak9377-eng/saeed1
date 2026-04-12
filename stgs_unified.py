@@ -123,32 +123,80 @@ def _save_counters(base_dir: Path, counters: dict) -> None:
                      encoding="utf-8")
 
 
+def _max_block_number_from_used_blocks(
+        key: str,
+        used_blocks_df: "Optional[pd.DataFrame]",
+) -> int:
+    """
+    Scan the Used Blocks dataset for existing IDs matching `key`
+    (e.g. "GAT-2.1") and return the highest block number found.
+    Returns 0 if no match exists.
+
+    This is the authoritative source for sequencing — the local JSON
+    counter is only used as a fallback when no Used Blocks file is loaded.
+    """
+    if used_blocks_df is None or used_blocks_df.empty:
+        return 0
+    if "Block-ID" not in used_blocks_df.columns:
+        return 0
+
+    import re
+    prefix  = key + "."          # e.g. "GAT-2.1."
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+    max_num = 0
+    for bid in used_blocks_df["Block-ID"].dropna().astype(str):
+        m = pattern.match(bid.strip())
+        if m:
+            max_num = max(max_num, int(m.group(1)))
+    return max_num
+
+
 def generate_block_ids(exam_name: str,
                        stage_name: str,
                        n_forms: int,
-                       part_or_level: int,   # 1/2 for Stage1 parts; 1/2/3 for difficulty
+                       part_or_level: int,    # 1/2 for Stage1 parts; 1/2/3 for difficulty
                        base_dir: Path,
+                       used_blocks_df: "Optional[pd.DataFrame]" = None,
                        ) -> list[str]:
     """
-    Generate n_forms sequential block IDs and persist the counter.
+    Generate n_forms sequential Block IDs that continue from wherever
+    the sequence currently stands.
 
-    Returns list of strings like ["GAT-1.1.001", "GAT-1.1.002", …]
+    Sequencing priority (as specified):
+      1. Scan Used Blocks dataset for the highest existing block number
+         in the same group (e.g. all "GAT-2.1.*" entries).
+         → Next block = max_found + 1
+      2. If no Used Blocks dataset is loaded (or group not found there),
+         read the local persistent JSON counter.
+      3. If neither exists → start from 001.
+
+    Returns list like ["GAT-2.1.006", "GAT-2.1.007", …]
+    The JSON counter is always updated after generation so it stays in
+    sync for future runs even without the Used Blocks file.
     """
     code    = EXAM_CODES.get(exam_name, "EX")
     sl      = STAGE_TO_SL.get(stage_name, (1, 1))
     stage_n = sl[0]
     level_n = part_or_level if sl[1] == 0 else sl[1]
 
-    # Counter key uniquely identifies this stage.level combination
+    # Canonical key for this exam / stage / level combination
     key = f"{code}-{stage_n}.{level_n}"
 
-    counters = _load_counters(base_dir)
-    start    = counters.get(key, 0) + 1
+    # Step 1: highest number already used (from Used Blocks dataset)
+    ub_max = _max_block_number_from_used_blocks(key, used_blocks_df)
+
+    # Step 2: highest number in local JSON counter
+    counters  = _load_counters(base_dir)
+    json_max  = counters.get(key, 0)
+
+    # Take the larger of the two so we never duplicate
+    start = max(ub_max, json_max) + 1
 
     ids: list[str] = []
     for i in range(n_forms):
         ids.append(f"{key}.{start + i:03d}")
 
+    # Persist the new high-water mark
     counters[key] = start + n_forms - 1
     _save_counters(base_dir, counters)
     return ids
@@ -2043,6 +2091,9 @@ class _BaseMode(tk.Toplevel):
                     self._ub_stats_lbl.config(
                         text=f"  {n_ub} questions loaded from Used Blocks file")
                     self._sv.set(f"Used Blocks loaded: {n_ub} questions")
+                    # Refresh preview — counter source may have changed
+                    if hasattr(self, "_refresh_block_preview"):
+                        self._refresh_block_preview()
                 elif k == "log":
                     _append_log(self._logbox, item[1], item[2] if len(item) > 2 else "")
                 elif k == "prog":
@@ -2412,31 +2463,80 @@ class Mode1Window(_BaseMode):
         _btn(pf, "Save & Preview Settings", self._save_settings,
              bg=BG_D).grid(row=9, column=0, columnspan=2, pady=8)
 
-        # ── Block ID panel ────────────────────────────────────────────────────
+        # ── Block ID Settings panel ───────────────────────────────────────────
         bid_frm = tk.LabelFrame(p, text="Block ID Settings",
                                 bg=BG_L, fg=BG_D, font=FH, padx=10, pady=8)
         bid_frm.grid(row=0, column=2, sticky="nsew", padx=(8, 0), pady=4)
         p.columnconfigure(2, weight=1)
 
-        tk.Label(bid_frm, text="Part / Difficulty Level:", bg=BG_L,
-                 fg=TXD, font=FB).grid(row=0, column=0, sticky="w", pady=2)
-        pl_frm = tk.Frame(bid_frm, bg=BG_L); pl_frm.grid(row=0, column=1, sticky="w")
-        for val, text in [(1,"Part 1 / Easy"),(2,"Part 2 / Medium"),(3,"Hard")]:
-            tk.Radiobutton(pl_frm, text=text, variable=self._part_level_var,
-                           value=val, bg=BG_L, fg=TXD, font=FB,
-                           activebackground=BG_L,
-                           command=self._refresh_block_preview).pack(anchor="w")
+        # ── Purpose explanation (collapsed by default, expandable) ────────────
+        help_txt = (
+            "Block ID Format:  <Code>-<Stage>.<Level>.<Number>\n"
+            "\n"
+            "Stage 1  →  two parts (not difficulty-based)\n"
+            "  1.1 = Part 1       GAT-1.1.001\n"
+            "  1.2 = Part 2       GAT-1.2.001\n"
+            "\n"
+            "Stage 2  →  three difficulty levels\n"
+            "  2.1 = Easy         GAT-2.1.001\n"
+            "  2.2 = Medium       GAT-2.2.015\n"
+            "  2.3 = Difficult    GAT-2.3.120\n"
+            "\n"
+            "Stage 3  →  three difficulty levels\n"
+            "  3.1 = Easy         GAT-3.1.001\n"
+            "  3.2 = Medium       GAT-3.2.010\n"
+            "  3.3 = Difficult    GAT-3.3.050\n"
+            "\n"
+            "Sequencing rule:\n"
+            "  If Used Blocks file is loaded, the counter\n"
+            "  continues from the highest existing block number\n"
+            "  (e.g. max found = 005 → next = 006).\n"
+            "  Otherwise the local JSON counter is used."
+        )
+        help_box = tk.Text(bid_frm, height=14, width=36,
+                           bg="#EEF2FF", fg=ETEC_NAVY,
+                           font=("Consolas", 8), state="normal",
+                           relief="solid", bd=1, wrap="none")
+        help_box.insert("end", help_txt)
+        help_box.config(state="disabled")
+        help_box.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
 
+        # ── Dynamic level selector ─────────────────────────────────────────────
+        tk.Label(bid_frm, text="Select level / part:", bg=BG_L,
+                 fg=TXD, font=FB).grid(row=1, column=0, sticky="nw", pady=2)
+        pl_frm = tk.Frame(bid_frm, bg=BG_L); pl_frm.grid(row=1, column=1, sticky="w")
+
+        # Store the radio-button widgets so _refresh_block_preview can retitle them
+        self._pl_radios: list[tk.Radiobutton] = []
+        for val in (1, 2, 3):
+            rb = tk.Radiobutton(pl_frm, text=f"Option {val}",
+                                variable=self._part_level_var,
+                                value=val, bg=BG_L, fg=TXD, font=FB,
+                                activebackground=BG_L,
+                                command=self._refresh_block_preview)
+            rb.pack(anchor="w")
+            self._pl_radios.append(rb)
+
+        # ── Preview + counter info ─────────────────────────────────────────────
         tk.Label(bid_frm, text="Block ID Preview:", bg=BG_L,
-                 fg=TXD, font=FB).grid(row=1, column=0, sticky="nw", pady=(8,2))
-        self._bid_preview = tk.Text(bid_frm, height=6, width=24,
+                 fg=TXD, font=FB).grid(row=2, column=0, sticky="nw", pady=(8, 2))
+        self._bid_preview = tk.Text(bid_frm, height=5, width=24,
                                     bg="#F0F4FF", fg=ETEC_NAVY,
                                     font=("Consolas", 9), state="disabled",
                                     relief="solid", bd=1)
-        self._bid_preview.grid(row=1, column=1, sticky="w", pady=(8,2))
+        self._bid_preview.grid(row=2, column=1, sticky="w", pady=(8, 2))
+
+        self._bid_counter_lbl = tk.Label(bid_frm, text="",
+                                         bg=BG_L, fg=ETEC_TEAL,
+                                         font=("Segoe UI", 8, "italic"))
+        self._bid_counter_lbl.grid(row=3, column=0, columnspan=2, sticky="w")
+
         _btn(bid_frm, "↺ Reset Counter",
              lambda: self._reset_block_counter(), bg=ETEC_PURPLE).grid(
-            row=2, column=0, columnspan=2, pady=4)
+            row=4, column=0, columnspan=2, pady=4)
+
+        # Set correct initial labels
+        self._update_level_radio_labels()
 
         # Manual bins
         bf = tk.LabelFrame(p, text="Manual Difficulty Bins (0.0 → 1.0)  — optional",
@@ -2488,9 +2588,51 @@ class Mode1Window(_BaseMode):
         else:
             self._rng_lbl.config(text=""); self._rng_ent.config(state="disabled")
             self._mean_lbl.config(text=""); self._mean_ent.config(state="disabled")
+        # Update Block ID radio labels whenever stage changes
+        if hasattr(self, "_pl_radios"):
+            self._refresh_block_preview()
+
+    def _update_level_radio_labels(self):
+        """
+        Retitle the three radio buttons based on which stage is selected:
+          Stage 1  → Part 1 / Part 2 / (greyed out)
+          Stage 2  → Easy (2.1) / Medium (2.2) / Difficult (2.3)
+          Stage 3  → Easy (3.1) / Medium (3.2) / Difficult (3.3)
+          E/M/D    → level is fixed — show which one is active
+        """
+        stage = self._stage_var.get() if hasattr(self, "_stage_var") else "Stage1"
+        sl    = STAGE_TO_SL.get(stage, (1, 0))
+        stage_n = sl[0]
+
+        if stage_n == 1:  # Stage1 — parts
+            labels    = ["Part 1  (1.1)", "Part 2  (1.2)", "—  (n/a)"]
+            disabled  = [False, False, True]
+        elif stage_n == 2:
+            labels    = ["Easy  (2.1)", "Medium  (2.2)", "Difficult  (2.3)"]
+            disabled  = [False, False, False]
+        else:  # stage_n == 3
+            labels    = ["Easy  (3.1)", "Medium  (3.2)", "Difficult  (3.3)"]
+            disabled  = [False, False, False]
+
+        # Also lock the selector when the stage already encodes the level
+        # (E → level always 1, M → always 2, D → always 3)
+        fixed_level = sl[1] if sl[1] != 0 else None
+
+        for i, (rb, lbl, dis) in enumerate(
+                zip(self._pl_radios, labels, disabled)):
+            rb.config(text=lbl)
+            if fixed_level is not None:
+                # Level is determined by the stage choice — disable all
+                rb.config(state="disabled")
+                self._part_level_var.set(fixed_level)
+            elif dis:
+                rb.config(state="disabled")
+            else:
+                rb.config(state="normal")
 
     def _refresh_block_preview(self):
-        """Update the Block ID preview text box based on current settings."""
+        """Update the Block ID preview text box and counter label."""
+        self._update_level_radio_labels()
         if self.source_path is None:
             return
         try:
@@ -2500,12 +2642,31 @@ class Mode1Window(_BaseMode):
         exam  = self._exam_var.get()
         stage = self._stage_var.get()
         pl    = self._part_level_var.get()
-        ids   = generate_block_ids(exam, stage, n,
-                                    pl, self.source_path.parent)
+        code  = EXAM_CODES.get(exam, "EX")
+        sl    = STAGE_TO_SL.get(stage, (1, 1))
+        stage_n = sl[0]
+        level_n = pl if sl[1] == 0 else sl[1]
+        key   = f"{code}-{stage_n}.{level_n}"
+
+        # What is the current high-water mark?
+        ub_max   = _max_block_number_from_used_blocks(key, self.used_blocks_df)
+        counters = _load_counters(self.source_path.parent)
+        json_max = counters.get(key, 0)
+        current  = max(ub_max, json_max)
+
+        # Preview IDs (do NOT persist — just for display)
+        ids = [f"{key}.{current + 1 + i:03d}" for i in range(n)]
+
         self._bid_preview.config(state="normal")
         self._bid_preview.delete("1.0", "end")
         self._bid_preview.insert("end", "\n".join(ids))
         self._bid_preview.config(state="disabled")
+
+        # Show where the counter currently stands
+        source = "Used Blocks" if ub_max >= json_max and ub_max > 0 \
+                 else ("JSON counter" if json_max > 0 else "none — starting at 001")
+        self._bid_counter_lbl.config(
+            text=f"Current max for {key}: {current:03d}  (source: {source})")
 
     def _reset_block_counter(self):
         """Clear the persisted counter for the current exam/stage/level."""
@@ -2543,7 +2704,8 @@ class Mode1Window(_BaseMode):
         if self.source_path:
             try:
                 ids = generate_block_ids(exam, stage, min(n_forms, 3),
-                                         pl, self.source_path.parent)
+                                         pl, self.source_path.parent,
+                                         self.used_blocks_df)
                 bid_preview = f"\nBlock IDs   : {ids[0]} … {ids[-1]}"
             except Exception:
                 pass
@@ -2704,11 +2866,12 @@ class Mode1Window(_BaseMode):
     def _gen_t(self, p, active_bank):
         try:
             n = p["n_forms"]; params = p["params"]
-            # Generate block IDs (persisted counter)
+            # Generate block IDs — sequence continues from Used Blocks dataset
             if self.source_path:
                 names = generate_block_ids(
                     p["exam"], p["stage"], n,
-                    p["part_level"], self.source_path.parent)
+                    p["part_level"], self.source_path.parent,
+                    self.used_blocks_df)
             else:
                 names = [f"Form_{i+1}" for i in range(n)]
             bank_label = ("unused-only" if self._bank_option.get() == 2
@@ -3397,7 +3560,8 @@ class Mode2Window(_BaseMode):
             pl    = getattr(self, "_n_forms_pl",    self._part_level_var.get())
             if self.source_path:
                 names = generate_block_ids(exam, stage, n, pl,
-                                           self.source_path.parent)
+                                           self.source_path.parent,
+                                           self.used_blocks_df)
             else:
                 names = [f"Form_{i+1}" for i in range(n)]
             self._lg(f"Starting assembly: {n} forms  [{bank_label}, {len(df)} questions]…")
