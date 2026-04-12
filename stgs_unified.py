@@ -1055,12 +1055,28 @@ class AssemblyEngine:
                 # Total items needed from this domain
                 total_needed = sum(quota.values())
 
+                # Domain-level mean target: clamp to the available pool's
+                # actual mean so we never target a value outside the pool.
+                # This prevents domains with skewed pools from drifting.
+                pool_diffs = pd.to_numeric(
+                    d_pool[self.dcol], errors="coerce").dropna()
+                if not pool_diffs.empty:
+                    pool_mean = float(pool_diffs.mean())
+                    # Blend 70% global target + 30% pool mean — keeps us close
+                    # to the overall target while honouring the pool distribution
+                    domain_mean_t = 0.70 * mean_t + 0.30 * pool_mean
+                    # Hard-clip to diff_range so we never target outside bounds
+                    domain_mean_t = float(np.clip(
+                        domain_mean_t, p.diff_range[0], p.diff_range[1]))
+                else:
+                    domain_mean_t = mean_t
+
                 # Apply stratified sampling on the combined D pool,
-                # honouring per-category hard caps
+                # honouring per-category hard caps and domain-level mean target
                 sel, warns = _pick_stratified_with_quota(
                     d_pool, total_needed, intra_form_used_ids,
                     quota, "_cat_label",
-                    p.diff_range, mean_t, sigma,
+                    p.diff_range, domain_mean_t, sigma,
                     p.allow_partial_fill, domain, form_number,
                     self.question_usage, self.dcol, self.rng,
                     p.allow_reuse, p.max_reuse,
@@ -1259,6 +1275,27 @@ class AssemblyEngine:
         return pool.reset_index(drop=True)
 
 
+def _domain_means_ok(form: pd.DataFrame, dcol: str,
+                     mn_range: tuple, domain_col: str) -> bool:
+    """
+    Check that EVERY D-domain in the form has its mean difficulty within
+    mn_range.  This prevents Domain V (or any other domain) from
+    individually violating the mean criterion even when the overall mean
+    looks fine.
+    """
+    if domain_col not in form.columns:
+        return True
+    for dom in form[domain_col].dropna().unique():
+        sub   = form[form[domain_col] == dom]
+        diffs = pd.to_numeric(sub[dcol], errors="coerce").dropna()
+        if diffs.empty:
+            continue
+        dom_mean = float(diffs.mean())
+        if not (mn_range[0] <= dom_mean <= mn_range[1]):
+            return False
+    return True
+
+
 def assemble_forms(bank: pd.DataFrame,
                    params: AssemblyParams,
                    dcol: str,
@@ -1267,19 +1304,31 @@ def assemble_forms(bank: pd.DataFrame,
                    ) -> list[tuple[pd.DataFrame, float, list[str]]]:
     """
     Assemble n_forms sharing usage tracking so questions spread.
-    Uses a retry loop (up to params.max_retries) per form to satisfy
-    the mean criterion — mirrors the original 100-retry logic.
+
+    Validation now checks BOTH:
+      • Overall form mean within diff_mean_range
+      • Every D-domain's mean within diff_mean_range
+
+    This prevents a domain like V from individually drifting outside the
+    allowed range even when the overall mean passes.
     """
-    # usage[QuestionID_str] = how many forms it has appeared in so far
     usage: dict[str, int] = {}
     results: list[tuple[pd.DataFrame, float, list[str]]] = []
-    mn_range = params.diff_mean_range
+    mn_range   = params.diff_mean_range
+    domain_col = "D" if "D" in bank.columns else "المجال"
+
+    def _passes(form, mean_d):
+        """True if overall mean AND all domain means are within range."""
+        if mn_range is None:
+            return True
+        if not (mn_range[0] <= mean_d <= mn_range[1]):
+            return False
+        return _domain_means_ok(form, dcol, mn_range, domain_col)
 
     for fidx, name in enumerate(form_names):
         engine = AssemblyEngine(bank, params, dcol, dict(usage))
         best_form, best_mean, best_warns = engine.assemble_one_form(fidx + 1)
-        success = (mn_range is None or
-                   (mn_range[0] <= best_mean <= mn_range[1]))
+        success = _passes(best_form, best_mean)
 
         if not success:
             for attempt in range(1, params.max_retries):
@@ -1291,10 +1340,16 @@ def assemble_forms(bank: pd.DataFrame,
                 })
                 eng2 = AssemblyEngine(bank, p2, dcol, dict(usage))
                 form2, mean2, w2 = eng2.assemble_one_form(fidx + 1)
-                if mn_range[0] <= mean2 <= mn_range[1]:
+                if _passes(form2, mean2):
                     best_form, best_mean, best_warns = form2, mean2, w2
                     success = True
                     break
+                # Keep the attempt closest to target even if none fully pass
+                curr_err = abs(best_mean - (mn_range[0]+mn_range[1])/2)
+                new_err  = abs(mean2      - (mn_range[0]+mn_range[1])/2)
+                if new_err < curr_err:
+                    best_form, best_mean, best_warns = form2, mean2, w2
+
             if not success:
                 best_warns.append(
                     f"{name}: mean criterion ({mn_range[0]:.2f}–{mn_range[1]:.2f}) "
