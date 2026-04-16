@@ -1,0 +1,88 @@
+SAEED AL KALTHAM
+Workforce Analytics and Information Systems Specialist
+Riyadh, Saudi Arabia
+Phone: +966 505 699 955
+Email: saeedalkaltham9377@outlook.com
+LinkedIn: linkedin.com/in/saeedalkaltham93
+
+========================================
+SUMMARY
+========================================
+Data-driven Information Systems Specialist with 7+ years architecting enterprise workforce analytics platforms, automating mission-critical assessment pipelines, and delivering executive-level Power BI dashboards across Saudi Arabia's largest public-sector assessment bodies. Reduced exam-processing time 20x and error rates by 95% through Python automation; led a 9-project portfolio influencing 500,000+ examinees annually. Recognized by C-suite leadership for innovation in adaptive testing, intelligent test generation, and large-scale data governance.
+
+========================================
+EXPERIENCE
+========================================
+
+Information Systems Specialist
+Education and Training Evaluation Commission (ETEC)
+Riyadh, Saudi Arabia
+August 2021 - Present
+
+Lead specialist for the national Questions and Exams Bank System, overseeing platform governance, workforce data analytics, demand forecasting, automation, and next-generation Computer-Based Testing (CBT) development for a system serving millions of examinees.
+
+- Architected the Smart Test Generation System (STGS), producing 560+ optimized exam forms and accelerating exam-form creation by 500% versus manual methods; approved by CEO after successful enterprise trials.
+- Engineered 9 Python-based automation solutions that reduced exam-processing cycle time by 20x, cut error rates from 40% to less than 1%, and eliminated 5 workdays of manual effort per exam cycle.
+- Drove end-to-end adaptive Computer-Based Testing (CBT) methodology design - covering block architecture, scoring models, and cut-score equations - reducing pre-publication quality-audit defects by 90%.
+- Consolidated Classical Test Theory (CTT) and Item Response Theory (IRT) statistical outputs into a unified pipeline, increasing data-transfer speed 10x and enabling direct item-bank integration for 60,000+ question records.
+- Managed vendor partnerships with STS, Examsoft, and FastTest, governing SLAs and technical delivery for platforms serving 500,000+ annual examinees.
+- Developed 60+ advanced analytical reports using SQL, Python, and Power BI (DAX, Power Query) consumed weekly by senior leadership for strategic decision-making and resource optimisation.
+- Delivered workforce analytics dashboards and Key Performance Indicators (KPIs) aligned to operational planning cycles, enabling headcount and cost modelling for fleet-scale programs.
+- Served as Business Analyst for PIAAC international assessment, evaluating vendor proposals, coordinating 4 cross-functional teams, and delivering leadership recommendation decks adopted in full.
+- Led iterative UI/UX enhancement cycles integrating usage-metrics feedback, increasing internal-user task-completion rate by an estimated 30%.
+
+Data Systems Specialist
+Qiyas - National Center for Assessment
+Riyadh, Saudi Arabia
+July 2018 - August 2021
+
+Owned data extraction, automation, and reporting pipelines for Saudi Arabia's national examination infrastructure, supporting 1,000,000+ annual test-taker records. Delivered actionable workforce insights and operational planning data to assessment leadership.
+
+- Automated national exam-transfer operations using Python, slashing processing time by 20x (from approximately 20 hours to less than 1 hour) and reducing transfer errors by 95% across every exam cycle.
+- Built an automated question-analysis workflow eliminating 5 workdays of repetitive manual work per exam, driving error rates from 40% to near 0%.
+- Designed and deployed Power BI dashboards transforming raw exam data into real-time Key Performance Indicators (KPIs) consumed by C-suite and assessment leadership for operational planning.
+- Fully automated the scoring mechanism for national tests, removing 100% of manual scoring steps and eliminating a documented source of score-reporting delays.
+- Created a longitudinal question-quality monitoring system tracking item-difficulty trends across cohorts, enabling psychometric teams to flag underperforming items 3x faster.
+- Contributed to AI-based online examination and next-generation item-bank vendor initiatives, representing internal technical requirements through RFP review and User Acceptance Testing (UAT) phases.
+
+Helpdesk Support Analyst
+Zakat, Tax and Customs Authority (ZATCA)
+Riyadh, Saudi Arabia
+April 2018 - July 2018
+
+- Resolved SAP-based client incidents with less than 4-hour average resolution time, maintaining detailed ticket records that informed service-quality improvement initiatives.
+
+========================================
+SKILLS
+========================================
+
+Technical Skills:
+SQL, Python, ETL pipelines, Data Mining, Workforce Demand Forecasting, Scenario Modelling, Headcount Modelling, Resource Planning, Statistical Analysis, Classical Test Theory (CTT), Item Response Theory (IRT), API Integration, System Performance Optimization, Quality Assurance (QA), User Acceptance Testing (UAT), Requirements Engineering
+
+Analytics and Visualization Tools:
+Power BI, DAX, Power Query, KPI Dashboard Development, Business Intelligence (BI), Executive Reporting, Microsoft Visio, Business Process Mapping
+
+Platforms and Systems:
+Enterprise Information Systems Management, Computer-Based Testing (CBT) Platforms, PearsonVUE, FastTest, Examsoft, Adaptive Testing Systems, Item Bank Systems, Microsoft Office Suite
+
+Project and Vendor Management:
+IT Program Leadership, Vendor Governance, SLA Management, Stakeholder Engagement, Cross-Functional Team Leadership, Workforce Analytics, Operational Planning, Budget and Cost Modelling
+
+========================================
+CERTIFICATIONS
+========================================
+IBM Cloud Pak for Data Enablement
+Microsoft Power BI Data Analyst
+
+========================================
+EDUCATION
+========================================
+Bachelor of Science, Computer Information Systems
+Kent State University, USA
+2017
+
+========================================
+LANGUAGES
+========================================
+Arabic - Native
+English - Fluent (Professional)

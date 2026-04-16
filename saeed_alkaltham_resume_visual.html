@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Saeed Al Kaltham – Resume</title>
+<style>
+  /* ── Reset & base ─────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { font-size: 10.5pt; }
+  body {
+    font-family: 'Calibri', 'Segoe UI', Arial, sans-serif;
+    color: #1a1a1a;
+    background: #fff;
+    line-height: 1.45;
+  }
+
+  /* ── Print layout – true A4 / letter ──────────────────────── */
+  @page { size: letter; margin: 0.65in 0.65in 0.65in 0.65in; }
+  @media print {
+    body { font-size: 9.5pt; }
+    .page { max-width: 100%; padding: 0; box-shadow: none; }
+    a { color: inherit; text-decoration: none; }
+  }
+
+  /* ── Page wrapper ─────────────────────────────────────────── */
+  .page {
+    max-width: 8.27in;
+    margin: 0 auto;
+    padding: 0.55in 0.65in 0.55in 0.65in;
+    background: #fff;
+    box-shadow: 0 2px 18px rgba(0,0,0,.13);
+  }
+
+  /* ── Header / Name block ──────────────────────────────────── */
+  header { border-bottom: 2.5px solid #0a3d6e; padding-bottom: 9px; margin-bottom: 10px; }
+  header h1 {
+    font-size: 23pt;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: #0a3d6e;
+    line-height: 1.15;
+    text-transform: uppercase;
+  }
+  header .title {
+    font-size: 11pt;
+    font-weight: 600;
+    color: #2264a8;
+    letter-spacing: 0.3px;
+    margin-top: 2px;
+    margin-bottom: 6px;
+  }
+  .contact-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 18px;
+    font-size: 8.8pt;
+    color: #444;
+  }
+  .contact-bar span { white-space: nowrap; }
+  .contact-bar a { color: #2264a8; text-decoration: none; }
+  .contact-bar a:hover { text-decoration: underline; }
+
+  /* ── Section wrapper ──────────────────────────────────────── */
+  section { margin-top: 11px; }
+  h2 {
+    font-size: 9.5pt;
+    font-weight: 700;
+    letter-spacing: 1.3px;
+    text-transform: uppercase;
+    color: #0a3d6e;
+    border-bottom: 1px solid #0a3d6e;
+    padding-bottom: 2px;
+    margin-bottom: 6px;
+  }
+
+  /* ── Summary ──────────────────────────────────────────────── */
+  .summary p {
+    font-size: 9.8pt;
+    color: #222;
+    line-height: 1.5;
+  }
+
+  /* ── Experience ───────────────────────────────────────────── */
+  .job { margin-bottom: 9px; }
+  .job-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 2px 8px;
+  }
+  .job-title { font-weight: 700; font-size: 10pt; color: #0a3d6e; }
+  .job-company { font-weight: 600; font-size: 9.5pt; color: #1a1a1a; }
+  .job-date {
+    font-size: 8.8pt;
+    color: #555;
+    white-space: nowrap;
+    font-style: italic;
+  }
+  .job-desc { font-size: 9pt; color: #444; margin: 2px 0 4px 0; font-style: italic; }
+  ul.bullets { padding-left: 14px; margin: 0; }
+  ul.bullets li {
+    font-size: 9.2pt;
+    color: #222;
+    margin-bottom: 3.5px;
+    line-height: 1.42;
+    list-style-type: disc;
+  }
+
+  /* ── Skills ───────────────────────────────────────────────── */
+  .skills-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 20px;
+  }
+  .skill-group { margin-bottom: 4px; }
+  .skill-group strong {
+    font-size: 9pt;
+    color: #0a3d6e;
+    display: block;
+    margin-bottom: 2px;
+  }
+  .skill-group span { font-size: 8.8pt; color: #333; }
+
+  /* ── Education ────────────────────────────────────────────── */
+  .edu-line {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    flex-wrap: wrap;
+  }
+  .edu-degree { font-weight: 700; font-size: 9.5pt; color: #0a3d6e; }
+  .edu-school { font-size: 9pt; color: #444; }
+  .edu-year { font-size: 8.8pt; color: #555; white-space: nowrap; }
+
+  /* ── Certifications ───────────────────────────────────────── */
+  .certs { font-size: 9pt; color: #333; }
+
+  /* ── Two-col layout for Skills + Certs ───────────────────── */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ═══════════════════════  HEADER  ═══════════════════════ -->
+  <header>
+    <h1>Saeed Al Kaltham</h1>
+    <div class="title">Workforce Analytics &amp; Information Systems Specialist</div>
+    <div class="contact-bar">
+      <span>&#128205; Riyadh, Saudi Arabia</span>
+      <span>&#128222; +966 505 699 955</span>
+      <span>&#9993; <a href="mailto:saeedalkaltham9377@outlook.com">saeedalkaltham9377@outlook.com</a></span>
+      <span>&#128279; <a href="https://www.linkedin.com/in/saeedalkaltham93" target="_blank">linkedin.com/in/saeedalkaltham93</a></span>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════  SUMMARY  ══════════════════════ -->
+  <section class="summary">
+    <h2>Professional Summary</h2>
+    <p>
+      Data-driven Information Systems Specialist with 7+ years architecting enterprise workforce analytics platforms, automating mission-critical assessment pipelines, and delivering executive-level Power BI dashboards across Saudi Arabia's largest public-sector assessment bodies. Reduced exam-processing time 20× and error rates by 95% through Python automation; led a 9-project portfolio valued at national scale, influencing 500K+ examinees annually. Recognized by C-suite leadership for innovation in adaptive testing, intelligent test generation, and large-scale data governance.
+    </p>
+  </section>
+
+  <!-- ═══════════════════════  EXPERIENCE  ═══════════════════ -->
+  <section>
+    <h2>Professional Experience</h2>
+
+    <!-- ETEC -->
+    <div class="job">
+      <div class="job-header">
+        <span class="job-title">Information Systems Specialist</span>
+        <span class="job-date">August 2021 – Present</span>
+      </div>
+      <div class="job-header" style="margin-top:1px;">
+        <span class="job-company">Education &amp; Training Evaluation Commission (ETEC) &mdash; Riyadh, Saudi Arabia</span>
+      </div>
+      <p class="job-desc">Lead specialist for the national Questions &amp; Exams Bank System, overseeing platform governance, automation, and next-generation CBT development for a system serving millions of examinees.</p>
+      <ul class="bullets">
+        <li>Architected the Smart Test Generation System (STGS), producing <strong>560+ optimized exam forms</strong> and accelerating exam-form creation by <strong>500%</strong> versus manual methods; approved by CEO after successful enterprise trials.</li>
+        <li>Engineered 9 Python-based automation solutions that reduced exam-processing cycle time by <strong>20×</strong>, cut error rates from <strong>40% to &lt;1%</strong>, and eliminated <strong>5 workdays of manual effort per exam cycle</strong>.</li>
+        <li>Drove end-to-end adaptive CBT methodology design — covering block architecture, scoring models, and cut-score equations — reducing pre-publication quality-audit defects by <strong>90%</strong>.</li>
+        <li>Consolidated CTT/IRT statistical outputs into a unified pipeline, increasing data-transfer speed <strong>10×</strong> and enabling direct item-bank integration for 60,000+ question records.</li>
+        <li>Managed vendor partnerships with <strong>STS, Examsoft, and FastTest</strong>, governing SLAs and technical delivery for platforms serving <strong>500K+ annual examinees</strong>.</li>
+        <li>Launched iterative UI/UX enhancement cycles integrating usage-metrics feedback, increasing internal-user task-completion rate by an estimated <strong>30%</strong>.</li>
+        <li>Developed <strong>60+ advanced analytical reports</strong> (SQL, Python, Power BI) consumed weekly by senior leadership for strategic decision-making.</li>
+        <li>Served as Business Analyst for PIAAC international assessment, evaluating vendor proposals, coordinating 4 cross-functional teams, and delivering leadership recommendation decks adopted in full.</li>
+      </ul>
+    </div>
+
+    <!-- Qiyas -->
+    <div class="job">
+      <div class="job-header">
+        <span class="job-title">Data Systems Specialist</span>
+        <span class="job-date">July 2018 – August 2021</span>
+      </div>
+      <div class="job-header" style="margin-top:1px;">
+        <span class="job-company">Qiyas – National Center for Assessment &mdash; Riyadh, Saudi Arabia</span>
+      </div>
+      <p class="job-desc">Owned data extraction, automation, and reporting pipelines for Saudi Arabia's national examination infrastructure, supporting 1M+ annual test-taker records.</p>
+      <ul class="bullets">
+        <li>Automated national exam-transfer operations using Python, slashing processing time by <strong>20× (from ~20 hrs to &lt;1 hr)</strong> and reducing transfer errors by <strong>95%</strong> across every exam cycle.</li>
+        <li>Built an automated question-analysis workflow that eliminated <strong>5 workdays of repetitive manual work per exam</strong>, driving error rates from <strong>40% to near 0%</strong>.</li>
+        <li>Designed and deployed <strong>Power BI dashboards</strong> transforming raw exam data into real-time KPI views consumed by C-suite and assessment leadership.</li>
+        <li>Fully automated the scoring mechanism for national tests, removing 100% of manual scoring steps and eliminating a documented source of <strong>score-reporting delays</strong>.</li>
+        <li>Created a longitudinal question-quality monitoring system that tracked item-difficulty trends across cohorts, enabling psychometric teams to flag underperforming items <strong>3× faster</strong>.</li>
+        <li>Contributed to AI-based online examination and next-generation item-bank vendor initiatives, representing internal technical requirements through RFP review and UAT phases.</li>
+      </ul>
+    </div>
+
+    <!-- ZATCA -->
+    <div class="job">
+      <div class="job-header">
+        <span class="job-title">Helpdesk Support Analyst</span>
+        <span class="job-date">April 2018 – July 2018</span>
+      </div>
+      <div class="job-header" style="margin-top:1px;">
+        <span class="job-company">Zakat, Tax &amp; Customs Authority (ZATCA) &mdash; Riyadh, Saudi Arabia</span>
+      </div>
+      <ul class="bullets">
+        <li>Resolved SAP-based client incidents with &lt;4-hour average resolution time, maintaining detailed ticket records that informed service-quality improvement initiatives.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════  SKILLS  ════════════════════════ -->
+  <section>
+    <h2>Skills</h2>
+    <div class="skills-grid">
+      <div class="skill-group">
+        <strong>Analytics &amp; Data</strong>
+        <span>SQL, Python (pandas, NumPy, openpyxl), ETL pipelines, Data Mining, Statistical Analysis (CTT/IRT), Workforce Demand Forecasting, Scenario Modelling</span>
+      </div>
+      <div class="skill-group">
+        <strong>Visualization &amp; BI</strong>
+        <span>Power BI (DAX, Power Query), KPI Dashboards, Executive Reporting, MS Visio (Business Process Mapping)</span>
+      </div>
+      <div class="skill-group">
+        <strong>Systems &amp; Platforms</strong>
+        <span>Enterprise Information Systems, CBT Platforms (PearsonVUE, FastTest, Examsoft), API/Data Integration, System Performance Optimization</span>
+      </div>
+      <div class="skill-group">
+        <strong>Project &amp; Vendor Management</strong>
+        <span>IT Program Leadership, Vendor Governance (SLA management), Stakeholder Engagement, Requirements Engineering, Quality Assurance</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════  CERTIFICATIONS  ════════════════ -->
+  <section>
+    <h2>Certifications</h2>
+    <p class="certs">IBM Cloud Pak for Data Enablement &nbsp;|&nbsp; Microsoft Power BI Data Analyst</p>
+  </section>
+
+  <!-- ═══════════════════════  EDUCATION  ════════════════════ -->
+  <section>
+    <h2>Education</h2>
+    <div class="edu-line">
+      <div>
+        <span class="edu-degree">Bachelor of Science – Computer Information Systems</span><br/>
+        <span class="edu-school">Kent State University, USA</span>
+      </div>
+      <span class="edu-year">2017</span>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════  LANGUAGES  ════════════════════ -->
+  <section>
+    <h2>Languages</h2>
+    <p class="certs">Arabic – Native &nbsp;|&nbsp; English – Fluent (Professional)</p>
+  </section>
+
+</div>
+</body>
+</html>
