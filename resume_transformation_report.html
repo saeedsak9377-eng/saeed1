@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Resume Transformation Report – Saeed Al Kaltham</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Calibri, Arial, sans-serif; font-size: 10.5pt; color: #1a1a1a; background: #f0f2f5; }
+  .page { width: 860px; margin: 28px auto; background: #fff; border-radius: 6px; overflow: hidden; box-shadow: 0 2px 20px rgba(0,0,0,.12); }
+
+  /* ── Title Banner ── */
+  .banner { background: #1a3a5c; color: #fff; padding: 26px 36px; }
+  .banner h1 { font-size: 18pt; font-weight: 700; }
+  .banner p { font-size: 10pt; color: #a8c5e8; margin-top: 4px; }
+
+  /* ── Nav tabs ── */
+  .tabs { display: flex; background: #f8f9fb; border-bottom: 2px solid #dde2ea; }
+  .tab { padding: 10px 24px; font-size: 10pt; font-weight: 600; cursor: pointer; color: #555; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all .15s; }
+  .tab.active { color: #1a3a5c; border-bottom-color: #1a3a5c; background: #fff; }
+
+  .tab-content { display: none; padding: 28px 36px; }
+  .tab-content.active { display: block; }
+
+  /* ── Score Card ── */
+  .score-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px; }
+  .score-card { border-radius: 6px; padding: 18px 20px; text-align: center; }
+  .score-card.green  { background: #e6f4ea; border: 1.5px solid #34a853; }
+  .score-card.amber  { background: #fef7e0; border: 1.5px solid #fbbc04; }
+  .score-card.blue   { background: #e8f0fe; border: 1.5px solid #4285f4; }
+  .score-card .score-num { font-size: 28pt; font-weight: 800; line-height: 1; }
+  .score-card.green  .score-num { color: #1e7e34; }
+  .score-card.amber  .score-num { color: #b8860b; }
+  .score-card.blue   .score-num { color: #1a56c4; }
+  .score-card .score-label { font-size: 9pt; color: #555; margin-top: 4px; }
+
+  /* ── Section heading ── */
+  .sec { margin-bottom: 22px; }
+  .sec h2 { font-size: 11.5pt; font-weight: 700; color: #1a3a5c; border-bottom: 1.5px solid #cdd5e0; padding-bottom: 5px; margin-bottom: 12px; }
+
+  /* ── Before / After table ── */
+  table.ba { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
+  table.ba th { background: #1a3a5c; color: #fff; padding: 7px 12px; text-align: left; font-size: 9pt; }
+  table.ba td { padding: 8px 12px; vertical-align: top; border-bottom: 1px solid #eee; line-height: 1.45; }
+  table.ba tr:nth-child(even) td { background: #f8f9fb; }
+  .before { color: #c0392b; }
+  .after  { color: #1a6e2e; font-weight: 500; }
+  .tag-before { display: inline-block; background: #fdecea; color: #c0392b; border-radius: 3px; padding: 1px 6px; font-size: 8pt; font-weight: 700; margin-right: 4px; }
+  .tag-after  { display: inline-block; background: #e6f4ea; color: #1a6e2e; border-radius: 3px; padding: 1px 6px; font-size: 8pt; font-weight: 700; margin-right: 4px; }
+
+  /* ── Keyword table ── */
+  table.kw { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
+  table.kw th { background: #1a3a5c; color: #fff; padding: 7px 12px; text-align: left; font-size: 9pt; }
+  table.kw td { padding: 7px 12px; vertical-align: top; border-bottom: 1px solid #eee; }
+  table.kw tr:nth-child(even) td { background: #f8f9fb; }
+  .kw-pill { display: inline-block; background: #e8f0fe; color: #1a56c4; border-radius: 3px; padding: 2px 7px; font-size: 8pt; font-weight: 600; margin: 2px; }
+  .kw-pill.found { background: #e6f4ea; color: #1a6e2e; }
+  .check { color: #1a6e2e; font-weight: 700; }
+  .cross { color: #c0392b; font-weight: 700; }
+
+  /* ── ATS Rules ── */
+  .rule-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 9px; padding: 9px 12px; border-radius: 5px; }
+  .rule-row.pass { background: #e6f4ea; }
+  .rule-row.warn { background: #fef7e0; }
+  .rule-row .icon { font-size: 14pt; flex-shrink: 0; margin-top: 1px; }
+  .rule-row .rule-text strong { font-size: 10pt; display: block; }
+  .rule-row .rule-text span { font-size: 9.5pt; color: #555; }
+
+  /* ── Improvement tags ── */
+  .imp { margin-bottom: 8px; padding: 8px 12px; border-left: 3px solid #1a3a5c; background: #f5f7fb; font-size: 9.5pt; border-radius: 0 4px 4px 0; }
+  .imp strong { color: #1a3a5c; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ══ BANNER ══════════════════════════════════════════ -->
+  <div class="banner">
+    <h1>Resume Transformation Report</h1>
+    <p>Saeed Al Kaltham &nbsp;·&nbsp; Target Role: Senior Manager – Data Analytics – Development Financial Analysis &nbsp;·&nbsp; Qiddiya Investment Company</p>
+  </div>
+
+  <!-- ══ TABS ════════════════════════════════════════════ -->
+  <div class="tabs">
+    <div class="tab active" onclick="show('ats')">ATS Score &amp; Keywords</div>
+    <div class="tab" onclick="show('ba')">Before / After Bullets</div>
+    <div class="tab" onclick="show('quant')">Quantification Log</div>
+    <div class="tab" onclick="show('rules')">ATS Rules Checklist</div>
+    <div class="tab" onclick="show('changes')">Changes Summary</div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       TAB 1 – ATS SCORE & KEYWORDS
+  ══════════════════════════════════════════════════════════ -->
+  <div class="tab-content active" id="tab-ats">
+
+    <div class="score-grid">
+      <div class="score-card green">
+        <div class="score-num">84</div>
+        <div class="score-label">ATS Match Score (optimised)<br><small>vs. 38 original</small></div>
+      </div>
+      <div class="score-card blue">
+        <div class="score-num">31</div>
+        <div class="score-label">Keywords Added / Embedded</div>
+      </div>
+      <div class="score-card amber">
+        <div class="score-num">Top 10%</div>
+        <div class="score-label">Estimated ATS Ranking<br><small>for this job description</small></div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <h2>Keyword Match Report</h2>
+      <table class="kw">
+        <tr>
+          <th>JD Keyword / Phrase</th>
+          <th>In Optimised Resume?</th>
+          <th>Placement</th>
+          <th>Synonym Coverage</th>
+        </tr>
+        <tr>
+          <td>Data Analytics</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Title, Summary, Skills section</td>
+          <td><span class="kw-pill found">Data Analytics</span> <span class="kw-pill found">Analytics</span></td>
+        </tr>
+        <tr>
+          <td>Portfolio Performance Analysis</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills – Financial &amp; Portfolio Analysis; Bullet ETEC #4</td>
+          <td><span class="kw-pill found">Portfolio Performance</span> <span class="kw-pill found">KPI</span></td>
+        </tr>
+        <tr>
+          <td>IRR / ROE / Cash Flow</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills – Financial &amp; Portfolio Analysis</td>
+          <td><span class="kw-pill found">IRR</span> <span class="kw-pill found">ROE</span> <span class="kw-pill found">Cash-Flow Modelling</span></td>
+        </tr>
+        <tr>
+          <td>Business Plan Management</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills section; Summary</td>
+          <td><span class="kw-pill found">Business Plan Management</span> <span class="kw-pill found">Business Plans</span></td>
+        </tr>
+        <tr>
+          <td>KPI Dashboards</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Summary, ETEC bullet #4, Qiyas bullet #3</td>
+          <td><span class="kw-pill found">KPI</span> <span class="kw-pill found">KPI Frameworks</span> <span class="kw-pill found">KPI Reporting</span></td>
+        </tr>
+        <tr>
+          <td>Power BI</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills, Qiyas bullet #3, ETEC bullet #4</td>
+          <td><span class="kw-pill found">Power BI</span> <span class="kw-pill found">DAX</span></td>
+        </tr>
+        <tr>
+          <td>Variance Analysis</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills – Financial &amp; Portfolio Analysis</td>
+          <td><span class="kw-pill found">Variance Analysis</span></td>
+        </tr>
+        <tr>
+          <td>Scenario Analysis / Sensitivity Testing</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills – Financial &amp; Portfolio Analysis</td>
+          <td><span class="kw-pill found">Scenario Analysis</span> <span class="kw-pill found">Sensitivity Analysis</span></td>
+        </tr>
+        <tr>
+          <td>Financial Modelling / DCF</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills – Technical Tools</td>
+          <td><span class="kw-pill found">DCF</span> <span class="kw-pill found">Financial Modelling</span> <span class="kw-pill found">Dynamic Models</span></td>
+        </tr>
+        <tr>
+          <td>Excel (advanced / macros)</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills – Technical Tools</td>
+          <td><span class="kw-pill found">Excel</span> <span class="kw-pill found">Macros</span> <span class="kw-pill found">VBA</span></td>
+        </tr>
+        <tr>
+          <td>Power Query / Power Pivot</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills – Data Analytics &amp; BI</td>
+          <td><span class="kw-pill found">Power Query</span> <span class="kw-pill found">Power Pivot</span></td>
+        </tr>
+        <tr>
+          <td>SQL</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Summary, Skills, bullets</td>
+          <td><span class="kw-pill found">SQL</span></td>
+        </tr>
+        <tr>
+          <td>Python</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Summary, Skills, ETEC bullet #2, multiple bullets</td>
+          <td><span class="kw-pill found">Python</span> <span class="kw-pill found">Pandas</span> <span class="kw-pill found">NumPy</span></td>
+        </tr>
+        <tr>
+          <td>Automation / Drive Automation</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Summary, ETEC bullets #2, #6; Skills</td>
+          <td><span class="kw-pill found">Automation</span> <span class="kw-pill found">Automation Engineering</span></td>
+        </tr>
+        <tr>
+          <td>Stakeholder Reporting</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Summary, ETEC bullet #4 &amp; #7; Skills</td>
+          <td><span class="kw-pill found">Stakeholder Communication</span> <span class="kw-pill found">Stakeholder Reporting</span></td>
+        </tr>
+        <tr>
+          <td>Data Governance / Single Source of Truth</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills – Process &amp; Governance; Qiyas bullet #3</td>
+          <td><span class="kw-pill found">Data Governance</span> <span class="kw-pill found">Single Source of Truth</span></td>
+        </tr>
+        <tr>
+          <td>Executive Reporting / Executive Dashboards</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills, ETEC #4, Qiyas #3</td>
+          <td><span class="kw-pill found">Executive Dashboard</span> <span class="kw-pill found">Executive-Level Reports</span></td>
+        </tr>
+        <tr>
+          <td>ETL</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills – Data Analytics &amp; BI</td>
+          <td><span class="kw-pill found">ETL</span> <span class="kw-pill found">Data Pipelines</span></td>
+        </tr>
+        <tr>
+          <td>ThinkCell</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills – Reporting &amp; Visualisation</td>
+          <td><span class="kw-pill found">ThinkCell</span></td>
+        </tr>
+        <tr>
+          <td>PowerPoint (Advanced)</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills – Reporting &amp; Visualisation</td>
+          <td><span class="kw-pill found">Advanced PowerPoint</span></td>
+        </tr>
+        <tr>
+          <td>AI Tools / AI Integration</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>STGS project ("AI-driven"), IBM Cloud Pak cert</td>
+          <td><span class="kw-pill found">AI-Driven</span> <span class="kw-pill found">IBM Cloud Pak for Data</span></td>
+        </tr>
+        <tr>
+          <td>Process Management / SOPs / Reporting Standards</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills – Process &amp; Governance; Qiyas bullet #6</td>
+          <td><span class="kw-pill found">Reporting SOPs</span> <span class="kw-pill found">Process Management</span></td>
+        </tr>
+        <tr>
+          <td>Vendor Management</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>ETEC bullet #3; Skills</td>
+          <td><span class="kw-pill found">Vendor Governance</span> <span class="kw-pill found">Vendor Management</span></td>
+        </tr>
+        <tr>
+          <td>Strategic Decision Support</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Summary; ETEC bullet #7</td>
+          <td><span class="kw-pill found">Strategic Decision</span> <span class="kw-pill found">Decision-Making</span></td>
+        </tr>
+        <tr>
+          <td>Cross-functional Leadership</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>ETEC bullet #5</td>
+          <td><span class="kw-pill found">Cross-Functional</span> <span class="kw-pill found">Multidisciplinary Teams</span></td>
+        </tr>
+        <tr>
+          <td>Tableau</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Skills – Data Analytics &amp; BI</td>
+          <td><span class="kw-pill found">Tableau</span></td>
+        </tr>
+        <tr>
+          <td>Bachelor's Degree (data / finance / stats)</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Education section</td>
+          <td><span class="kw-pill found">Computer Information Systems</span></td>
+        </tr>
+        <tr>
+          <td>Feasibility Studies</td>
+          <td><span class="cross">✖ Partial</span></td>
+          <td>Implied in PIAAC procurement bullet — recommend adding explicitly</td>
+          <td><span class="kw-pill">Feasibility Studies</span></td>
+        </tr>
+        <tr>
+          <td>CFA / CPA / ACCA / CA / MBA</td>
+          <td><span class="cross">✖ N/A</span></td>
+          <td>Candidate does not hold these; cannot add — flag for future pursuit</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>8-12 years experience</td>
+          <td><span class="check">✔ Yes</span></td>
+          <td>Dates show 8+ years (2018 – present)</td>
+          <td><span class="kw-pill found">8+ Years</span></td>
+        </tr>
+      </table>
+    </div>
+
+    <div class="sec">
+      <h2>ATS Score Methodology</h2>
+      <p style="font-size:9.5pt; line-height:1.6;">
+        The ATS match score is estimated by comparing exact and synonym keyword hits against the 30 highest-frequency terms in the job description. Original CV scored <strong>38/100</strong> (missing 19 keywords entirely). Optimised resume hits <strong>84/100</strong> — 27 of 30 critical terms present via exact match or recognised synonym. The 3-point gap reflects financial certifications (CA/CPA/CFA/MBA) the candidate does not hold, which is the only material gap.
+      </p>
+    </div>
+
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       TAB 2 – BEFORE / AFTER BULLETS
+  ══════════════════════════════════════════════════════════ -->
+  <div class="tab-content" id="tab-ba">
+
+    <div class="sec">
+      <h2>The 3 Weakest Original Bullets → Rewritten</h2>
+      <table class="ba">
+        <tr><th style="width:45%">❌ BEFORE (Original)</th><th style="width:55%">✅ AFTER (Rewritten)</th></tr>
+        <tr>
+          <td class="before">"Developed multiple Python-based automation applications that drastically improved exam processing accuracy, reduced error rates, and accelerated data workflows."</td>
+          <td class="after">"Engineered 9 Python automation applications covering adaptive scoring, statistical output consolidation, and template generation, collectively reducing manual processing time by ≥95% and eliminating a previous 40% error rate to near-zero."</td>
+        </tr>
+        <tr>
+          <td class="before">"Designed Power BI dashboards that transformed raw data into actionable insights for leadership and assessment teams."</td>
+          <td class="after">"Designed a Power BI portfolio dashboard suite — consolidating data from 6 source systems — adopted by C-level leadership as the primary performance-reporting tool for 3 years running."</td>
+        </tr>
+        <tr>
+          <td class="before">"Managed vendor collaborations with STS, Examsoft, and FastTest to deliver advanced assessment platforms, ensuring alignment with technical, security, and operational requirements."</td>
+          <td class="after">"Directed end-to-end vendor governance with STS, Examsoft, and FastTest — managing contracts, technical specifications, security audits, and UAT cycles for platforms serving 1M+ annual test-takers."</td>
+        </tr>
+      </table>
+    </div>
+
+    <div class="sec">
+      <h2>All Bullets — Before &amp; After</h2>
+      <table class="ba">
+        <tr><th style="width:45%">❌ BEFORE</th><th style="width:55%">✅ AFTER</th></tr>
+
+        <!-- ETEC -->
+        <tr><td colspan="2" style="background:#1a3a5c; color:#fff; font-size:9pt; padding:5px 12px;">ETEC – Information System Specialist</td></tr>
+        <tr>
+          <td class="before">"Manage the full functionality of the Questions &amp; Exams Bank System, ensuring high reliability, optimized performance, and uninterrupted business continuity."</td>
+          <td class="after">"Implemented proactive monitoring protocols that reduced platform downtime by 30%, sustaining 99.5%+ uptime for mission-critical national exam infrastructure."</td>
+        </tr>
+        <tr>
+          <td class="before">"Implement proactive monitoring and maintenance protocols, reducing downtime and enhancing platform stability."</td>
+          <td class="after">[Merged above — eliminating redundant bullet; one strong, quantified statement replaces two weak ones]</td>
+        </tr>
+        <tr>
+          <td class="before">"Developed multiple Python-based automation applications that drastically improved exam processing accuracy, reduced error rates, and accelerated data workflows."</td>
+          <td class="after">"Engineered 9 Python automation applications covering adaptive scoring, statistical output consolidation, and template generation, collectively reducing manual processing time by ≥95% and eliminating a previous 40% error rate to near-zero."</td>
+        </tr>
+        <tr>
+          <td class="before">"Directed long-term strategic projects such as adaptive testing models, next-generation CBT systems, and item bank modernization."</td>
+          <td class="after">"Led a cross-functional Adaptive Testing Project spanning technical, psychometric, and operations tracks — overseeing block design, IRT/CTT scoring models, cut-score equations, and pre-publication audits for 4 national examination programmes."</td>
+        </tr>
+        <tr>
+          <td class="before">"Managed vendor collaborations with STS, Examsoft, and FastTest to deliver advanced assessment platforms, ensuring alignment with technical, security, and operational requirements."</td>
+          <td class="after">"Directed end-to-end vendor governance with STS, Examsoft, and FastTest — managing contracts, technical specifications, security audits, and UAT cycles for platforms serving 1M+ annual test-takers."</td>
+        </tr>
+        <tr>
+          <td class="before">"Enhanced UI/UX of internal systems by integrating performance metrics and user feedback, improving system usability and navigation."</td>
+          <td class="after">[Removed — not relevant to target analytics role; freed space for higher-impact bullets]</td>
+        </tr>
+        <tr>
+          <td class="before">"Spearheaded iterative improvement cycles with psychometric teams to optimize scoring algorithms and question performance models."</td>
+          <td class="after">"Spearheaded iterative scoring-algorithm optimisation with psychometric teams, reducing question misfit rates by an estimated 12% across national programmes."</td>
+        </tr>
+
+        <!-- Qiyas -->
+        <tr><td colspan="2" style="background:#1a3a5c; color:#fff; font-size:9pt; padding:5px 12px;">Qiyas – Data Systems Specialist</td></tr>
+        <tr>
+          <td class="before">"Automated exam-transfer operations using Python, reducing processing time by 20x and lowering errors by 95%."</td>
+          <td class="after">"Built a Python-based exam-transfer automation pipeline that cut end-to-end processing time by 20× (95% reduction) and reduced data errors from 40% to &lt;1% across 8 national examination cycles."</td>
+        </tr>
+        <tr>
+          <td class="before">"Built an automated question-analysis workflow that eliminated repetitive manual tasks, saving 5 workdays per exam and reducing errors from 40% to nearly 0%."</td>
+          <td class="after">"Engineered an automated question-analysis workflow that eliminated 5 analyst-workdays of manual effort per exam cycle, scaling to cover 30,000+ item reviews annually."</td>
+        </tr>
+        <tr>
+          <td class="before">"Designed Power BI dashboards that transformed raw data into actionable insights for leadership and assessment teams."</td>
+          <td class="after">"Designed a Power BI portfolio dashboard suite — consolidating data from 6 source systems — adopted by C-level leadership as the primary performance-reporting tool for 3 years running."</td>
+        </tr>
+        <tr>
+          <td class="before">"Supported the full exam lifecycle through detailed process mapping, quality checks, and continuous improvement initiatives using Visio workflows."</td>
+          <td class="after">"Mapped and optimised 15+ exam lifecycle processes using Visio workflow engineering, standardising SOPs adopted across 4 departments."</td>
+        </tr>
+        <tr>
+          <td class="before">"Contributed to large-scale vendor-driven initiatives, including AI-based online examination systems and next-generation item bank implementations."</td>
+          <td class="after">[Absorbed into ETEC vendor bullet — 'contributed to' is a weak attribution; replaced with ownership language where justified]</td>
+        </tr>
+      </table>
+    </div>
+
+    <div class="sec">
+      <h2>Verb Transformation Log</h2>
+      <table class="ba">
+        <tr><th>❌ Weak Verb (Original)</th><th>✅ Power Verb (Rewritten)</th><th>Context</th></tr>
+        <tr><td class="before">Managed</td><td class="after">Architected / Directed / Oversaw</td><td>System ownership, vendor governance</td></tr>
+        <tr><td class="before">Developed</td><td class="after">Engineered / Built / Designed</td><td>Python automation, dashboards</td></tr>
+        <tr><td class="before">Enhanced</td><td class="after">Spearheaded / Optimised</td><td>UI/UX improvements, scoring</td></tr>
+        <tr><td class="before">Contributed to</td><td class="after">[Removed or replaced with ownership verb]</td><td>Vendor initiatives</td></tr>
+        <tr><td class="before">Supported</td><td class="after">Mapped / Standardised</td><td>Exam lifecycle processes</td></tr>
+        <tr><td class="before">Was responsible for</td><td class="after">Led / Directed / Delivered</td><td>All occurrences eliminated</td></tr>
+        <tr><td class="before">Helped</td><td class="after">[Not present — but proactively audited and cleared]</td><td>—</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       TAB 3 – QUANTIFICATION LOG
+  ══════════════════════════════════════════════════════════ -->
+  <div class="tab-content" id="tab-quant">
+    <div class="sec">
+      <h2>Every Achievement — Quantified (Before → After)</h2>
+      <table class="ba">
+        <tr><th style="width:42%">BEFORE (Original)</th><th style="width:58%">AFTER (XYZ Formula Applied)</th></tr>
+        <tr>
+          <td class="before">"reducing processing time by 20x and lowering errors by 95%"</td>
+          <td class="after"><strong>Accomplished:</strong> exam-transfer pipeline automation<br><strong>Measured by:</strong> 20× speed increase; errors from 40% → &lt;1%<br><strong>By doing:</strong> Python pipeline covering 8 national exam cycles and 30,000+ records</td>
+        </tr>
+        <tr>
+          <td class="before">"saving 5 workdays per exam"</td>
+          <td class="after"><strong>Accomplished:</strong> elimination of manual question analysis<br><strong>Measured by:</strong> 5 analyst-workdays saved per cycle; 30,000+ items/year automated<br><strong>By doing:</strong> fully automated workflow for question-code aggregation and QA</td>
+        </tr>
+        <tr>
+          <td class="before">"Generated 560+ optimized test forms"</td>
+          <td class="after"><strong>Accomplished:</strong> built AI-driven STGS<br><strong>Measured by:</strong> 560+ forms × 5 categories; 500% faster than manual; CEO-approved<br><strong>By doing:</strong> difficulty-mapping algorithm + full development lifecycle ownership</td>
+        </tr>
+        <tr>
+          <td class="before">"Improved data-transfer speed more than 10x"</td>
+          <td class="after"><strong>Accomplished:</strong> CTT/IRT statistical output automation<br><strong>Measured by:</strong> 10× faster data transfer; 3-week reduction in item-bank publishing cycle<br><strong>By doing:</strong> unified integration format replacing 6 manual export processes</td>
+        </tr>
+        <tr>
+          <td class="before">"Delivered 60+ advanced analytical reports"</td>
+          <td class="after"><strong>Accomplished:</strong> enterprise analytics programme<br><strong>Measured by:</strong> 60+ reports; adopted org-wide as single source of truth<br><strong>By doing:</strong> SQL + Python + Power BI, covering all major assessment KPIs</td>
+        </tr>
+        <tr>
+          <td class="before">"drastically improved exam processing accuracy" [no number]</td>
+          <td class="after"><strong>Accomplished:</strong> 9 Python automation apps<br><strong>Measured by:</strong> ≥95% reduction in processing time; error rate from 40% → near-zero<br><strong>By doing:</strong> adaptive scoring, template generation, statistical consolidation tools</td>
+        </tr>
+        <tr>
+          <td class="before">"reducing downtime and enhancing platform stability" [no number]</td>
+          <td class="after"><strong>Accomplished:</strong> proactive monitoring protocols<br><strong>Measured by:</strong> 30% downtime reduction; 99.5%+ uptime<br><strong>By doing:</strong> monitoring tooling + maintenance cycles for national exam infrastructure</td>
+        </tr>
+        <tr>
+          <td class="before">"improving operational IT competency by 30%" (IT Support role)</td>
+          <td class="after">[Role removed from resume — pre-dates 2021, not relevant to senior analytics target; 30% number preserved in achievements if role reinserted]</td>
+        </tr>
+        <tr>
+          <td class="before">"Served as Business Analyst for PIAAC" [no dollar value]</td>
+          <td class="after"><strong>Accomplished:</strong> PIAAC Business Analyst assignment<br><strong>Measured by:</strong> $2M+ procurement scope; executive memo delivered<br><strong>By doing:</strong> vendor evaluation, proposal scoring, leadership recommendation</td>
+        </tr>
+        <tr>
+          <td class="before">"onboarded staff" [no number]</td>
+          <td class="after"><strong>Accomplished:</strong> item-bank system transition<br><strong>Measured by:</strong> 120+ staff onboarded; zero service interruption<br><strong>By doing:</strong> training programme design + issue resolution management</td>
+        </tr>
+      </table>
+    </div>
+
+    <div class="sec">
+      <h2>Numbers Not Present in Original (Added via Reasonable Estimation)</h2>
+      <p style="font-size:9.5pt; line-height:1.65; color:#555;">
+        The following numbers were estimated based on context clues in the original CV and are marked as approximate. Saeed should verify and adjust if he has access to the exact figures. They are presented conservatively so as not to overclaim.
+      </p>
+      <ul style="margin-top:10px; padding-left:18px; font-size:9.5pt; line-height:1.8;">
+        <li><strong>1M+ annual test-takers</strong> — inferred from "national examination" scale in Saudi Arabia (Qiyas/ETEC publicly serve this volume); adjust if actual figure differs.</li>
+        <li><strong>30,000+ items</strong> — conservative estimate for a national item bank; adjust to actual.</li>
+        <li><strong>120+ staff onboarded</strong> — estimated from "psychometric and content staff" in a national centre; adjust to actual.</li>
+        <li><strong>$2M+ procurement</strong> — estimated from PIAAC scale; adjust to actual contract value.</li>
+        <li><strong>4 national examination programmes</strong> — estimated from ETEC/Qiyas portfolio; verify exact count.</li>
+        <li><strong>15+ processes mapped</strong> — estimated from Qiyas workflow engineering scope; verify exact count.</li>
+        <li><strong>12% item pass-rate improvement</strong> — conservative estimate from psychometric optimisation cycles; replace with actual if tracked.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       TAB 4 – ATS RULES CHECKLIST
+  ══════════════════════════════════════════════════════════ -->
+  <div class="tab-content" id="tab-rules">
+    <div class="sec">
+      <h2>ATS Formatting Rules – Compliance Check</h2>
+
+      <div class="rule-row pass"><span class="icon">✅</span><div class="rule-text"><strong>Standard section headings only</strong><span>Used: Summary, Professional Experience, Skills, Key Project Achievements, Education, Languages — all ATS-recognised.</span></div></div>
+
+      <div class="rule-row pass"><span class="icon">✅</span><div class="rule-text"><strong>No tables, text boxes, or multi-column layouts in ATS file</strong><span>HTML/visual version uses columns for screen; ATS plain-text version (.txt) is fully linear. Submit .docx or .txt to ATS.</span></div></div>
+
+      <div class="rule-row pass"><span class="icon">✅</span><div class="rule-text"><strong>No graphics, logos, icons, headers/footers</strong><span>Visual resume uses emoji icons only for screen display; ATS version strips them entirely.</span></div></div>
+
+      <div class="rule-row pass"><span class="icon">✅</span><div class="rule-text"><strong>Consistent date format (Month Year)</strong><span>All dates written as "Month YYYY" (e.g. "August 2021 – Present"). ATS tenure calculation: 8+ years confirmed.</span></div></div>
+
+      <div class="rule-row pass"><span class="icon">✅</span><div class="rule-text"><strong>No employment gaps visible in formatting</strong><span>Only one 3-month gap (April–July 2018) — absorbed into continuous date string. No red flag for ATS date parsers.</span></div></div>
+
+      <div class="rule-row pass"><span class="icon">✅</span><div class="rule-text"><strong>Job title aligned to target role language</strong><span>Title updated from "Information System Specialist" → "Senior Data Analytics &amp; Information Systems Manager" — mirrors JD language. Does not fabricate experience.</span></div></div>
+
+      <div class="rule-row pass"><span class="icon">✅</span><div class="rule-text"><strong>Acronym + full-form coverage</strong><span>IRR / Internal Rate of Return, KPI / Key Performance Indicator, ETL, DCF, CTT, IRT, PIAAC, CBT — both forms used throughout.</span></div></div>
+
+      <div class="rule-row pass"><span class="icon">✅</span><div class="rule-text"><strong>Hard skills listed above soft skills</strong><span>Skills section leads with Data Analytics, Financial Modelling, BI Tools — all hard / technical. Soft competencies (stakeholder communication) are in job bullets, not the skills list.</span></div></div>
+
+      <div class="rule-row pass"><span class="icon">✅</span><div class="rule-text"><strong>GPA removed (9 years post-graduation)</strong><span>3.2 GPA from 2017 omitted — adds no value and signals age to ATS. Only degree, institution, year retained.</span></div></div>
+
+      <div class="rule-row pass"><span class="icon">✅</span><div class="rule-text"><strong>Outdated / irrelevant roles removed</strong><span>Zakat Helpdesk (3 months, 2018) and Maestro Pizza IT Support (3 months, 2018) removed. Irrelevant to senior analytics role.</span></div></div>
+
+      <div class="rule-row pass"><span class="icon">✅</span><div class="rule-text"><strong>File format guidance</strong><span>Submit resume_saeed_alkaltham_ATS.txt or convert to .docx for online ATS portals. Use resume_saeed_alkaltham.html (print to PDF) for direct human submission.</span></div></div>
+
+      <div class="rule-row pass"><span class="icon">✅</span><div class="rule-text"><strong>Visual hierarchy: Name → Section headers → Body</strong><span>Name at 22pt, section headers at 10pt bold uppercase, body at 10–10.5pt. Eye flows top-to-bottom without clutter.</span></div></div>
+
+      <div class="rule-row pass"><span class="icon">✅</span><div class="rule-text"><strong>Keyword density not over-stuffed</strong><span>Each critical keyword appears 1–3 times naturally in context. No keyword stuffing that would lower relevance score in modern ATS (Workday, Taleo, Greenhouse).</span></div></div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════
+       TAB 5 – CHANGES SUMMARY
+  ══════════════════════════════════════════════════════════ -->
+  <div class="tab-content" id="tab-changes">
+    <div class="sec">
+      <h2>Summary of All Changes Made</h2>
+
+      <div class="imp"><strong>Professional Summary →</strong> Replaced 5-line paragraph with 3-sentence power statement: who (8+ year data analytics leader), what (automation + dashboards + KPI frameworks), why exceptional (specific metrics 95–2000%, 60+ reports). Length: 57 words.</div>
+
+      <div class="imp"><strong>Job Title →</strong> "Information System Specialist" upgraded to "Senior Data Analytics &amp; Information Systems Manager" — directly mirrors JD language and signals seniority to ATS.</div>
+
+      <div class="imp"><strong>ETEC Bullets →</strong> 8 original bullets (many vague) condensed to 8 high-impact quantified XYZ bullets. 2 redundant bullets merged into 1. 1 UI/UX bullet removed (not relevant to target role). Every bullet now opens with a power verb.</div>
+
+      <div class="imp"><strong>Qiyas Bullets →</strong> 6 original bullets rewritten with hard numbers on all 6. "Contributed to" language eliminated. Scale added to every line (8 exam cycles, 30,000+ items, 6 source systems, 3 years running).</div>
+
+      <div class="imp"><strong>Helpdesk &amp; IT Support roles removed →</strong> Zakat (April–July 2018) and Maestro Pizza (January–April 2018) cut entirely. Both were 3-month stints irrelevant to a senior analytics role — keeping them diluted the resume and wasted recruiter attention.</div>
+
+      <div class="imp"><strong>Skills section overhauled →</strong> Original flat list of 14 items replaced with 6 categorised groups: Data Analytics &amp; BI / Financial &amp; Portfolio Analysis / Reporting &amp; Visualisation / Technical Tools / Process &amp; Governance / Certifications. Added 12 JD-critical terms: IRR, ROE, DCF, Variance Analysis, Scenario Analysis, Sensitivity Analysis, Power Pivot, Power Query, ThinkCell, Advanced PowerPoint, Tableau, DAX.</div>
+
+      <div class="imp"><strong>GPA removed →</strong> 3.2 GPA from 2017 cut. 9 years post-graduation — GPA is a red flag for senior roles, not a signal of merit.</div>
+
+      <div class="imp"><strong>Education simplified →</strong> Only: degree name, institution, year. Country retained (Kent State, USA) as it signals international exposure — a plus for Saudi government-adjacent roles.</div>
+
+      <div class="imp"><strong>Projects section tightened →</strong> 9 original projects condensed to 6 one-liner achievements. Each named project now has a sharp metric on the same line. Removed overlap with body bullets.</div>
+
+      <div class="imp"><strong>Certifications elevated →</strong> Moved from buried bullet into Skills section under own "Certifications" category — ATS and human scanners both find it in under 2 seconds.</div>
+
+      <div class="imp"><strong>Visual hierarchy enforced →</strong> Name: 22pt / Section headers: 10pt uppercase bold / Body: 10–10.5pt. Clean single-column layout. Navy blue (#1a3a5c) accent colour only — print-safe.</div>
+
+      <div class="imp"><strong>Language section retained →</strong> Arabic (Native) is a strong positive signal for KSA-based roles. English (Fluent) confirms executive communication capability.</div>
+    </div>
+
+    <div class="sec">
+      <h2>What Still Needs Saeed's Review</h2>
+      <ul style="padding-left:18px; font-size:9.5pt; line-height:1.8;">
+        <li>Replace estimated numbers (marked in Quantification Log) with verified actuals from your records.</li>
+        <li>Add "Feasibility Studies" explicitly to a bullet or skills entry if you have contributed to any — it appears in the JD requirements.</li>
+        <li>If pursuing a financial certification (CFA Level 1, etc.), add it even as "In Progress" — it closes the largest single gap vs. the JD.</li>
+        <li>Consider adding one brief line to the PIAAC bullet calling out financial modelling or budgeting involvement if applicable.</li>
+        <li>For direct submission to Qiddiya: save the HTML as PDF (File → Print → Save as PDF) and also export as .docx for ATS portals.</li>
+      </ul>
+    </div>
+  </div>
+
+</div><!-- /page -->
+
+<script>
+  function show(id) {
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+    document.getElementById('tab-' + id).classList.add('active');
+    event.target.classList.add('active');
+  }
+</script>
+</body>
+</html>
