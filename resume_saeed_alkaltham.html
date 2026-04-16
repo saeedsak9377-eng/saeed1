@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Saeed Al Kaltham – Resume</title>
+<style>
+  /* ── Reset & Base ─────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Calibri', 'Segoe UI', Arial, sans-serif;
+    font-size: 10.5pt;
+    color: #1a1a1a;
+    background: #f5f5f5;
+  }
+  a { color: inherit; text-decoration: none; }
+
+  /* ── Page Shell ───────────────────────────────────────── */
+  .page {
+    width: 794px;          /* A4 @ 96dpi */
+    min-height: 1123px;
+    margin: 24px auto;
+    background: #fff;
+    padding: 40px 44px 36px 44px;
+    box-shadow: 0 2px 18px rgba(0,0,0,.13);
+  }
+
+  /* ── Header ───────────────────────────────────────────── */
+  .header { border-bottom: 2.5px solid #1a3a5c; padding-bottom: 10px; margin-bottom: 14px; }
+  .header h1 {
+    font-size: 22pt;
+    font-weight: 700;
+    letter-spacing: .5px;
+    color: #1a3a5c;
+    line-height: 1.1;
+  }
+  .header .title {
+    font-size: 11pt;
+    font-weight: 600;
+    color: #2a6496;
+    margin-top: 2px;
+    letter-spacing: .3px;
+  }
+  .contact-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    margin-top: 7px;
+    font-size: 9.5pt;
+    color: #444;
+  }
+  .contact-row span { white-space: nowrap; }
+  .contact-row span::before { content: attr(data-icon) " "; }
+
+  /* ── Section Headings ─────────────────────────────────── */
+  .section { margin-bottom: 13px; }
+  .section-title {
+    font-size: 10pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1.1px;
+    color: #1a3a5c;
+    border-bottom: 1.2px solid #1a3a5c;
+    padding-bottom: 2px;
+    margin-bottom: 7px;
+  }
+
+  /* ── Summary ──────────────────────────────────────────── */
+  .summary p { line-height: 1.55; font-size: 10.5pt; }
+
+  /* ── Experience ───────────────────────────────────────── */
+  .job { margin-bottom: 10px; }
+  .job-header { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; }
+  .job-header .employer { font-weight: 700; font-size: 10.5pt; color: #1a3a5c; }
+  .job-header .dates { font-size: 9.5pt; color: #555; white-space: nowrap; }
+  .job-title { font-size: 10pt; font-weight: 600; color: #2a6496; margin-top: 1px; margin-bottom: 4px; }
+  ul.bullets { padding-left: 16px; }
+  ul.bullets li {
+    margin-bottom: 3px;
+    line-height: 1.45;
+    font-size: 10pt;
+  }
+  ul.bullets li::marker { color: #2a6496; }
+
+  /* ── Two-column row (Skills / Languages) ─────────────── */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; }
+
+  /* ── Skills ───────────────────────────────────────────── */
+  .skill-group { margin-bottom: 5px; }
+  .skill-group .label { font-weight: 700; font-size: 9.5pt; color: #1a3a5c; }
+  .skill-group .items { font-size: 9.5pt; color: #333; }
+
+  /* ── Projects ─────────────────────────────────────────── */
+  .project { margin-bottom: 6px; }
+  .project .proj-title { font-weight: 700; font-size: 10pt; color: #1a3a5c; }
+
+  /* ── Education ────────────────────────────────────────── */
+  .edu-row { display: flex; justify-content: space-between; align-items: baseline; }
+  .edu-row .degree { font-weight: 700; font-size: 10pt; }
+  .edu-row .year { font-size: 9.5pt; color: #555; }
+  .edu-school { font-size: 9.5pt; color: #444; margin-top: 1px; }
+
+  /* ── Print ────────────────────────────────────────────── */
+  @media print {
+    body { background: #fff; }
+    .page { box-shadow: none; margin: 0; padding: 24px 28px; width: 100%; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ══ HEADER ══════════════════════════════════════════ -->
+  <div class="header">
+    <h1>SAEED AL KALTHAM</h1>
+    <div class="title">Senior Data Analytics &amp; Information Systems Manager</div>
+    <div class="contact-row">
+      <span data-icon="📍">Riyadh, Saudi Arabia</span>
+      <span data-icon="📞">+966 50 569 9955</span>
+      <span data-icon="✉">saeedalkaltham9377@outlook.com</span>
+      <span data-icon="🔗"><a href="https://www.linkedin.com/in/saeedalkaltham93">linkedin.com/in/saeedalkaltham93</a></span>
+    </div>
+  </div>
+
+  <!-- ══ PROFESSIONAL SUMMARY ════════════════════════════ -->
+  <div class="section summary">
+    <div class="section-title">Professional Summary</div>
+    <p>
+      Data Analytics &amp; Information Systems leader with 8+ years driving enterprise-wide automation, portfolio dashboards, and KPI reporting frameworks across public-sector assessment ecosystems.
+      Architected Python and SQL pipelines that slashed processing time by 95–2,000%, delivered 60+ Power BI executive dashboards, and led multidisciplinary teams on next-generation digital platforms.
+      Proven stakeholder communicator who translates complex financial and operational data into board-ready decisions — now targeting portfolio performance analytics and financial modelling within dynamic development environments.
+    </p>
+  </div>
+
+  <!-- ══ EXPERIENCE ═══════════════════════════════════════ -->
+  <div class="section">
+    <div class="section-title">Professional Experience</div>
+
+    <!-- ETEC -->
+    <div class="job">
+      <div class="job-header">
+        <span class="employer">Education &amp; Training Evaluation Commission (ETEC)</span>
+        <span class="dates">August 2021 – Present</span>
+      </div>
+      <div class="job-title">Information System Specialist (Senior Manager Level)</div>
+      <ul class="bullets">
+        <li>Architected an AI-driven Smart Test Generation System (STGS) that produced <strong>560+ optimised assessment forms</strong> across 5 categories, accelerating form creation by <strong>500%</strong> and earning CEO sign-off after enterprise-wide trials.</li>
+        <li>Engineered 9 Python automation applications covering adaptive scoring, statistical output consolidation, and template generation, collectively reducing manual processing time by <strong>≥95%</strong> and eliminating a previous <strong>40% error rate</strong> to near-zero.</li>
+        <li>Directed end-to-end vendor governance with STS, Examsoft, and FastTest — managing contracts, technical specifications, security audits, and UAT cycles for platforms serving <strong>1M+ annual test-takers</strong>.</li>
+        <li>Delivered <strong>60+ executive-level analytical reports</strong> using SQL, Python, and Power BI; dashboards adopted organisation-wide as single source of truth for assessment KPIs.</li>
+        <li>Led a cross-functional Adaptive Testing Project spanning technical, psychometric, and operations tracks — overseeing block design, IRT/CTT scoring models, cut-score equations, and pre-publication audits for <strong>4 national examination programmes</strong>.</li>
+        <li>Implemented proactive monitoring protocols that reduced platform downtime by <strong>30%</strong>, sustaining 99.5%+ uptime for mission-critical national exam infrastructure.</li>
+        <li>Served as Business Analyst for PIAAC: led vendor evaluation, proposal scoring, and executive recommendation memo — contributing to a procurement decision covering <strong>$2M+ in assessment services</strong>.</li>
+        <li>Spearheaded item-bank modernisation transition — designed training programmes, managed issue resolution, and onboarded <strong>120+ psychometric and content staff</strong> with zero service interruption.</li>
+      </ul>
+    </div>
+
+    <!-- Qiyas -->
+    <div class="job">
+      <div class="job-header">
+        <span class="employer">Qiyas – National Center for Assessment</span>
+        <span class="dates">July 2018 – August 2021</span>
+      </div>
+      <div class="job-title">Data Systems Specialist</div>
+      <ul class="bullets">
+        <li>Built a Python-based exam-transfer automation pipeline that cut end-to-end processing time by <strong>20× (95% reduction)</strong> and reduced data errors from <strong>40% to &lt;1%</strong> across 8 national examination cycles.</li>
+        <li>Engineered an automated question-analysis workflow that eliminated <strong>5 analyst-workdays of manual effort per exam cycle</strong>, scaling to cover 30,000+ item reviews annually.</li>
+        <li>Designed a Power BI portfolio dashboard suite — consolidating data from 6 source systems — adopted by C-level leadership as the primary performance-reporting tool for <strong>3 years running</strong>.</li>
+        <li>Created a longitudinal question-quality monitoring system that tracked difficulty trends across <strong>100,000+ items</strong>, enabling proactive psychometric interventions and improving item pass-rates by an estimated <strong>12%</strong>.</li>
+        <li>Automated CTT/IRT statistical outputs into a unified integration format, improving data-transfer speed by <strong>10×</strong> and directly accelerating item-bank publishing by 3 weeks per cycle.</li>
+        <li>Mapped and optimised 15+ exam lifecycle processes using Visio workflow engineering, standardising SOPs adopted across 4 departments.</li>
+      </ul>
+    </div>
+
+  </div>
+
+  <!-- ══ SKILLS ════════════════════════════════════════════ -->
+  <div class="section">
+    <div class="section-title">Skills</div>
+    <div class="two-col">
+      <div>
+        <div class="skill-group">
+          <span class="label">Data Analytics &amp; BI: </span>
+          <span class="items">Power BI (advanced dashboards, DAX), Tableau, SQL, Python (Pandas, NumPy), ETL, Data Mining, Power Query, Power Pivot</span>
+        </div>
+        <div class="skill-group">
+          <span class="label">Financial &amp; Portfolio Analysis: </span>
+          <span class="items">KPI Frameworks, IRR / ROE / Cash-Flow Modelling, Scenario &amp; Sensitivity Analysis, Variance Analysis, Business Plan Management</span>
+        </div>
+        <div class="skill-group">
+          <span class="label">Reporting &amp; Visualisation: </span>
+          <span class="items">Executive Dashboard Design, ThinkCell, Advanced PowerPoint, Single Source of Truth Governance</span>
+        </div>
+      </div>
+      <div>
+        <div class="skill-group">
+          <span class="label">Technical Tools: </span>
+          <span class="items">Microsoft Excel (DCF, dynamic models, macros, VBA), MS Visio, CBT Platforms, PearsonVUE, FastTest, Examsoft, IBM Cloud Pak for Data</span>
+        </div>
+        <div class="skill-group">
+          <span class="label">Process &amp; Governance: </span>
+          <span class="items">Data Governance, Reporting SOPs, Automation Engineering, QA Testing, Vendor Management, Stakeholder Communication</span>
+        </div>
+        <div class="skill-group">
+          <span class="label">Certifications: </span>
+          <span class="items">IBM Cloud Pak for Data Enablement · Power BI (Microsoft)</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ KEY PROJECT ACHIEVEMENTS ════════════════════════ -->
+  <div class="section">
+    <div class="section-title">Key Project Achievements</div>
+
+    <div class="project">
+      <span class="proj-title">Smart Test Generation System (STGS)</span> — AI-driven automated exam-form engine; generated <strong>560+ forms</strong> across 5 categories, <strong>5× faster</strong> than manual methods; approved by CEO.
+    </div>
+    <div class="project">
+      <span class="proj-title">Adaptive Scoring &amp; Scoring Automation</span> — Automated response-file scoring with internal validation; reduced human scoring errors to <strong>&lt;0.5%</strong>; officially adopted post-pilot.
+    </div>
+    <div class="project">
+      <span class="proj-title">Statistical Output Automation Program</span> — Consolidated CTT / IRT outputs into a single integration layer; improved data-transfer speed <strong>10×</strong>, cutting publishing cycle by 3 weeks.
+    </div>
+    <div class="project">
+      <span class="proj-title">Longitudinal Question Quality Study</span> — Automated difficulty-trend monitoring across <strong>100,000+ items</strong>; proactive alerting reduced psychometric review cycles by <strong>40%</strong>.
+    </div>
+    <div class="project">
+      <span class="proj-title">Head of Adaptive Testing Project</span> — Led 3 cross-functional tracks (technical, psychometric, operations) for 4 national programmes; delivered on time and within scope.
+    </div>
+    <div class="project">
+      <span class="proj-title">Executive Reporting &amp; Business Analysis</span> — Built <strong>60+ reports</strong> in SQL / Python / Power BI; led PIAAC vendor evaluation covering <strong>$2M+ procurement</strong>.
+    </div>
+  </div>
+
+  <!-- ══ EDUCATION ═════════════════════════════════════════ -->
+  <div class="section">
+    <div class="section-title">Education</div>
+    <div class="edu-row">
+      <span class="degree">Bachelor of Science – Computer Information Systems</span>
+      <span class="year">2017</span>
+    </div>
+    <div class="edu-school">Kent State University, USA</div>
+  </div>
+
+  <!-- ══ LANGUAGES ═════════════════════════════════════════ -->
+  <div class="section">
+    <div class="section-title">Languages</div>
+    <p style="font-size:9.5pt;">Arabic (Native) &nbsp;·&nbsp; English (Fluent)</p>
+  </div>
+
+</div><!-- /page -->
+</body>
+</html>

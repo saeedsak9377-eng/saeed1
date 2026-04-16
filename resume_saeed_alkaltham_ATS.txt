@@ -1,0 +1,87 @@
+SAEED AL KALTHAM
+Senior Data Analytics & Information Systems Manager
+Riyadh, Saudi Arabia | +966 50 569 9955 | saeedalkaltham9377@outlook.com | linkedin.com/in/saeedalkaltham93
+
+-------------------------------------------------------------------
+PROFESSIONAL SUMMARY
+-------------------------------------------------------------------
+Data Analytics & Information Systems leader with 8+ years driving enterprise-wide automation, portfolio dashboards, and KPI reporting frameworks across public-sector assessment ecosystems. Architected Python and SQL pipelines that slashed processing time by 95-2,000%, delivered 60+ Power BI executive dashboards, and led multidisciplinary teams on next-generation digital platforms. Proven stakeholder communicator who translates complex financial and operational data into board-ready decisions -- now targeting portfolio performance analytics and financial modelling within dynamic development environments.
+
+-------------------------------------------------------------------
+PROFESSIONAL EXPERIENCE
+-------------------------------------------------------------------
+
+Education & Training Evaluation Commission (ETEC)
+Information System Specialist (Senior Manager Level)
+August 2021 - Present
+
+- Architected an AI-driven Smart Test Generation System (STGS) that produced 560+ optimised assessment forms across 5 categories, accelerating form creation by 500% and earning CEO sign-off after enterprise-wide trials.
+- Engineered 9 Python automation applications covering adaptive scoring, statistical output consolidation, and template generation, collectively reducing manual processing time by 95%+ and eliminating a previous 40% error rate to near-zero.
+- Directed end-to-end vendor governance with STS, Examsoft, and FastTest -- managing contracts, technical specifications, security audits, and UAT cycles for platforms serving 1M+ annual test-takers.
+- Delivered 60+ executive-level analytical reports using SQL, Python, and Power BI; dashboards adopted organisation-wide as single source of truth for assessment KPIs.
+- Led a cross-functional Adaptive Testing Project spanning technical, psychometric, and operations tracks -- overseeing block design, IRT/CTT scoring models, cut-score equations, and pre-publication audits for 4 national examination programmes.
+- Implemented proactive monitoring protocols that reduced platform downtime by 30%, sustaining 99.5%+ uptime for mission-critical national exam infrastructure.
+- Served as Business Analyst for PIAAC: led vendor evaluation, proposal scoring, and executive recommendation memo -- contributing to a procurement decision covering $2M+ in assessment services.
+- Spearheaded item-bank modernisation transition -- designed training programmes, managed issue resolution, and onboarded 120+ psychometric and content staff with zero service interruption.
+
+Qiyas - National Center for Assessment
+Data Systems Specialist
+July 2018 - August 2021
+
+- Built a Python-based exam-transfer automation pipeline that cut end-to-end processing time by 20x (95% reduction) and reduced data errors from 40% to <1% across 8 national examination cycles.
+- Engineered an automated question-analysis workflow that eliminated 5 analyst-workdays of manual effort per exam cycle, scaling to cover 30,000+ item reviews annually.
+- Designed a Power BI portfolio dashboard suite -- consolidating data from 6 source systems -- adopted by C-level leadership as the primary performance-reporting tool for 3 years running.
+- Created a longitudinal question-quality monitoring system that tracked difficulty trends across 100,000+ items, enabling proactive psychometric interventions and improving item pass-rates by an estimated 12%.
+- Automated CTT/IRT statistical outputs into a unified integration format, improving data-transfer speed by 10x and directly accelerating item-bank publishing by 3 weeks per cycle.
+- Mapped and optimised 15+ exam lifecycle processes using Visio workflow engineering, standardising SOPs adopted across 4 departments.
+
+-------------------------------------------------------------------
+SKILLS
+-------------------------------------------------------------------
+
+Data Analytics & Business Intelligence: Power BI (Advanced Dashboards, DAX), Tableau, SQL, Python (Pandas, NumPy), ETL, Data Mining, Power Query, Power Pivot
+
+Financial & Portfolio Analysis: KPI Frameworks, IRR / ROE / Cash-Flow Modelling, Scenario Analysis, Sensitivity Analysis, Variance Analysis, Business Plan Management, DCF Modelling
+
+Reporting & Visualisation: Executive Dashboard Design, ThinkCell, Advanced PowerPoint, Single Source of Truth Governance, Portfolio Performance Reporting
+
+Technical Tools: Microsoft Excel (DCF, Dynamic Models, Macros, VBA), MS Visio, CBT Platforms, PearsonVUE, FastTest, Examsoft, IBM Cloud Pak for Data, Microsoft Office Suite
+
+Process & Governance: Data Governance, Reporting SOPs, Automation Engineering, QA Testing, Vendor Management, Stakeholder Communication, Cross-Functional Leadership
+
+Certifications: IBM Cloud Pak for Data Enablement | Power BI (Microsoft Certified)
+
+-------------------------------------------------------------------
+KEY PROJECT ACHIEVEMENTS
+-------------------------------------------------------------------
+
+Smart Test Generation System (STGS) -- AI-driven automated exam-form engine; generated 560+ forms across 5 categories, 5x faster than manual methods; approved by CEO after enterprise trials.
+
+Adaptive Scoring & Scoring Automation -- Automated response-file scoring with internal validation; reduced human scoring errors to <0.5%; officially adopted post-pilot.
+
+Statistical Output Automation Program -- Consolidated CTT/IRT outputs into a unified integration layer; improved data-transfer speed 10x, cutting publishing cycle by 3 weeks.
+
+Longitudinal Question Quality Study -- Automated difficulty-trend monitoring across 100,000+ items; proactive alerting reduced psychometric review cycles by 40%.
+
+Head of Adaptive Testing Project -- Led 3 cross-functional tracks (technical, psychometric, operations) for 4 national programmes; delivered on time and within scope.
+
+Executive Reporting & Business Analysis -- Built 60+ reports in SQL/Python/Power BI; led PIAAC vendor evaluation covering $2M+ procurement.
+
+-------------------------------------------------------------------
+EDUCATION
+-------------------------------------------------------------------
+
+Bachelor of Science - Computer Information Systems
+Kent State University, USA | 2017
+
+-------------------------------------------------------------------
+LANGUAGES
+-------------------------------------------------------------------
+
+Arabic (Native) | English (Fluent)
+
+-------------------------------------------------------------------
+FILE FORMAT NOTE:
+Submit this .txt or a .docx conversion for ATS online portals.
+Use the PDF version (resume_saeed_alkaltham.html printed to PDF) for direct human or email submission.
+-------------------------------------------------------------------
