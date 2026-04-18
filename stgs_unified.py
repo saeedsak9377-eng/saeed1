@@ -568,17 +568,576 @@ class AssemblyParams:
     slots:           list[SlotDef]
     diff_range:      tuple[float, float] = (0.0, 1.0)
     diff_mean_range: Optional[tuple[float, float]] = None
-    min_discrimination: Optional[float] = None   # filter تمييز / Discrimination
+    min_discrimination: Optional[float] = None
     allow_partial_fill: bool = True
     allow_reuse:        bool = False
     max_reuse:          int  = 3
     max_retries:        int  = 100
     rng_seed:           Optional[int] = None
-    # Used Blocks fallback (5th priority — last resort)
+    # Used Blocks fallback
     used_blocks:        Optional["pd.DataFrame"] = field(default=None)
     allow_used_blocks:  bool = False
     # Adaptive Mean Control
     adaptive_mean_control: bool = False
+    # ── Feature 2: Difficulty distribution scope ──────────────────────────────
+    # 'exam'     = one overall mean check for the whole form (default)
+    # 'domain'   = each D-domain must independently meet mean target
+    # 'category' = each Category must independently meet mean target
+    difficulty_scope: str = "exam"
+    # ── Feature 3: Difficulty method (Delta = current; CCT = classical) ───────
+    difficulty_method: str = "delta"
+    cct_profile:       str = "Common"
+    # ── Feature 4: Fallback for difficulty (dedicated reuse for mean targets) ─
+    allow_fallback_reuse: bool = False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  FEATURE 1 — DYNAMIC EXAM TEMPLATE IMPORT / EXPORT
+# ══════════════════════════════════════════════════════════════════════════════
+
+TEMPLATE_HEADERS = ["Exam type", "D", "Category", "Count"]
+TEMPLATE_EXAMPLE_ROWS = [
+    ["المبكر", "V",  "VRS",   3],
+    ["المبكر", "V",  "VSS",   4],
+    ["المبكر", "V",  "VME",   5],
+    ["المبكر", "V",  "VVT",   1],
+    ["المبكر", "Q",  "QSS",   3],
+    ["المبكر", "Q",  "QRE",   6],
+    ["المبكر", "Q",  "QVC",   4],
+    ["المبكر", "Q",  "QQW",   3],
+    ["المبكر", "Q",  "QRT",   2],
+    ["المبكر", "SR", "SRW",   3],
+    ["المبكر", "SR", "SRTTM", 5],
+    ["المبكر", "SR", "SRMKS", 6],
+    ["المبكر", "SR", "SRML",  7],
+]
+
+
+def export_exam_template(out_path: Path) -> None:
+    """Write a blank/example template .xlsx for users to fill in."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    wb = Workbook(); ws = wb.active; ws.title = "Exam Template"
+
+    # Header styling
+    hdr_fill = PatternFill("solid", fgColor="1F3864")
+    hdr_font = Font(bold=True, color="FFFFFF", size=11)
+    border   = Border(
+        left=Side(style='thin'), right=Side(style='thin'),
+        top=Side(style='thin'), bottom=Side(style='thin'))
+
+    for ci, hdr in enumerate(TEMPLATE_HEADERS, 1):
+        cell = ws.cell(row=1, column=ci, value=hdr)
+        cell.font = hdr_fill and hdr_font; cell.fill = hdr_fill
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = border
+
+    # Example data rows
+    alt_fill = PatternFill("solid", fgColor="DCE6F1")
+    for ri, row in enumerate(TEMPLATE_EXAMPLE_ROWS, 2):
+        fill = alt_fill if ri % 2 == 0 else PatternFill()
+        for ci, val in enumerate(row, 1):
+            cell = ws.cell(row=ri, column=ci, value=val)
+            cell.fill = fill; cell.border = border
+
+    # Column widths
+    for col, width in zip("ABCD", [20, 12, 16, 10]):
+        ws.column_dimensions[col].width = width
+
+    # Instructions sheet
+    ws2 = wb.create_sheet("Instructions")
+    instructions = [
+        ["Column",     "Description",                            "Example"],
+        ["Exam type",  "Name of the exam to create",            "المبكر"],
+        ["D",          "Domain / Section code",                 "V, Q, SR"],
+        ["Category",   "Skill subcategory code",                "VRS, QSS"],
+        ["Count",      "Number of questions required (integer)", "5"],
+        ["",           "",                                       ""],
+        ["Rules:",     "", ""],
+        ["",           "• One exam name per file",               ""],
+        ["",           "• No empty cells in any row",           ""],
+        ["",           "• Count must be a positive integer",    ""],
+        ["",           "• (Domain, Category) pairs must be unique", ""],
+    ]
+    ws2.column_dimensions["A"].width = 14
+    ws2.column_dimensions["B"].width = 40
+    ws2.column_dimensions["C"].width = 16
+    for ri, row in enumerate(instructions, 1):
+        for ci, val in enumerate(row, 1):
+            ws2.cell(row=ri, column=ci, value=val)
+
+    wb.save(str(out_path))
+    log.info("Exam template exported → %s", out_path)
+
+
+def import_exam_template(path: Path) -> tuple[str, dict, list[str]]:
+    """
+    Parse an exam template file.
+
+    Returns
+    -------
+    (exam_name, structure, errors)
+
+    structure = {
+        "ExamName": {
+            "DomainA": {"CatA": count, "CatB": count, ...},
+            "DomainB": {...},
+        }
+    }
+    errors = [] on success, list of human-readable messages on failure.
+    """
+    errors: list[str] = []
+
+    # Read file
+    try:
+        suffix = path.suffix.lower()
+        if suffix in (".xlsx", ".xls"):
+            df = pd.read_excel(path, engine="openpyxl")
+        elif suffix == ".csv":
+            df = pd.read_csv(path, encoding="utf-8-sig")
+        else:
+            return "", {}, [f"Unsupported file type: {suffix}"]
+    except Exception as exc:
+        return "", {}, [f"Cannot read file: {exc}"]
+
+    if df.empty:
+        return "", {}, ["File is empty."]
+
+    # Validate headers
+    missing_headers = [h for h in TEMPLATE_HEADERS if h not in df.columns]
+    if missing_headers:
+        return "", {}, [
+            f"Missing required column(s): {', '.join(missing_headers)}.  "
+            f"Expected headers: {TEMPLATE_HEADERS}"
+        ]
+
+    # Work on a clean copy
+    df = df[TEMPLATE_HEADERS].copy()
+
+    # Row-level validation
+    exam_names = set()
+    seen_pairs: set[tuple] = set()
+    for i, row in df.iterrows():
+        rn = i + 2  # 1-indexed with header row
+        for col in TEMPLATE_HEADERS:
+            if pd.isna(row[col]) or str(row[col]).strip() == "":
+                errors.append(f"Row {rn}: empty value in column '{col}'.")
+        if errors:
+            continue
+        exam_names.add(str(row["Exam type"]).strip())
+        try:
+            cnt = int(row["Count"])
+            if cnt <= 0:
+                errors.append(f"Row {rn}: Count must be > 0 (got {cnt}).")
+        except (ValueError, TypeError):
+            errors.append(f"Row {rn}: Count is not a valid integer (got '{row['Count']}').")
+        pair = (str(row["D"]).strip(), str(row["Category"]).strip())
+        if pair in seen_pairs:
+            errors.append(f"Row {rn}: duplicate (D, Category) pair {pair}.")
+        seen_pairs.add(pair)
+
+    if len(exam_names) > 1:
+        errors.append(
+            f"File contains multiple exam names: {exam_names}. "
+            "Only one exam name is allowed per file."
+        )
+
+    if errors:
+        return "", {}, errors
+
+    exam_name = str(df["Exam type"].iloc[0]).strip()
+
+    # Build structure
+    structure: dict = {exam_name: {}}
+    for _, row in df.iterrows():
+        domain = str(row["D"]).strip()
+        cat    = str(row["Category"]).strip()
+        count  = int(row["Count"])
+        structure[exam_name].setdefault(domain, {})[cat] = count
+
+    log.info("Template imported: exam='%s', %d domains, %d categories",
+             exam_name,
+             len(structure[exam_name]),
+             sum(len(cats) for cats in structure[exam_name].values()))
+    return exam_name, structure, []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  FEATURE 2 — DIFFICULTY SCOPE HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _check_scope_mean(form: pd.DataFrame, dcol: str,
+                      mn_range: tuple, scope: str,
+                      domain_col: str = "D") -> bool:
+    """
+    Return True if the form satisfies the mean criterion at the given scope.
+
+    scope='exam'     → check overall form mean only
+    scope='domain'   → check each D-domain independently
+    scope='category' → check each Category independently
+    """
+    if mn_range is None:
+        return True
+    lo, hi = mn_range
+
+    def _mean_ok(subset):
+        diffs = pd.to_numeric(subset[dcol], errors="coerce").dropna()
+        return diffs.empty or (lo <= float(diffs.mean()) <= hi)
+
+    if scope == "exam":
+        return _mean_ok(form)
+
+    if scope == "domain":
+        grp_col = domain_col if domain_col in form.columns else dcol
+        if grp_col == dcol:
+            return _mean_ok(form)
+        for dom in form[grp_col].dropna().unique():
+            if not _mean_ok(form[form[grp_col] == dom]):
+                return False
+        return True
+
+    if scope == "category":
+        cat_col = "Category" if "Category" in form.columns else \
+                  ("الناتج" if "الناتج" in form.columns else None)
+        if cat_col is None:
+            return _mean_ok(form)
+        for cat in form[cat_col].dropna().unique():
+            if not _mean_ok(form[form[cat_col] == cat]):
+                return False
+        return True
+
+    return _mean_ok(form)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  FEATURE 3 — CCT DIFFICULTY PROFILES
+# ══════════════════════════════════════════════════════════════════════════════
+
+CCT_RULES: dict[str, dict] = {
+    "Common":       {"Range": (0.20, 0.90), "Mean": (0.49, 0.55)},
+    "D":            {"Range": (0.00, 0.45), "Mean": (0.27, 0.35)},
+    "M":            {"Range": (0.40, 0.75), "Mean": (0.55, 0.61)},
+    "E":            {"Range": (0.70, 1.00), "Mean": (0.80, 0.88)},
+    "Manually set": {"Range": None,          "Mean": None},
+}
+
+
+def resolve_diff_params(params: "AssemblyParams") -> tuple:
+    """
+    Return (diff_range, diff_mean_range) resolved from the selected method.
+
+    Delta (default) → use params.diff_range / params.diff_mean_range as-is.
+    CCT             → look up profile in CCT_RULES; manual overrides allowed.
+    """
+    if params.difficulty_method == "cct":
+        profile = CCT_RULES.get(params.cct_profile, CCT_RULES["Common"])
+        diff_range      = profile["Range"] or params.diff_range
+        diff_mean_range = profile["Mean"]  or params.diff_mean_range
+        return diff_range, diff_mean_range
+    return params.diff_range, params.diff_mean_range
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  FEATURE 4 — FALLBACK-FOR-DIFFICULTY (controlled reuse targeting mean)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _fallback_for_difficulty(
+        form: pd.DataFrame,
+        dcol: str,
+        mn_range: tuple,
+        scope: str,
+        params: "AssemblyParams",
+        bank: pd.DataFrame,
+        used_ids: set,
+        question_usage: dict,
+        rng: np.random.Generator,
+        form_number: int,
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Feature 4 — controlled reuse specifically to hit the difficulty mean.
+
+    Triggered when:
+      1. allow_fallback_reuse=True
+      2. The form fails the scope-level mean check
+      3. Main bank (unused questions) was insufficient
+
+    Strategy: swap items whose difficulty deviates most from the target mean
+    with items from the reuse pool (bank + used_blocks), sorted by:
+      - Least reuse count first
+      - Difficulty closest to what is needed to correct the mean
+    """
+    warnings: list[str] = []
+    if not params.allow_fallback_reuse or mn_range is None:
+        return form, warnings
+    if _check_scope_mean(form, dcol, mn_range, scope):
+        return form, warnings   # already fine
+
+    lo, hi = mn_range
+    target = (lo + hi) / 2.0
+    current = float(pd.to_numeric(form[dcol], errors="coerce").dropna().mean())
+
+    # Build reuse pool from bank items already used (not in current form)
+    reuse_pool_parts = []
+    reuse_ids = {q for q, c in question_usage.items() if 0 < c < params.max_reuse}
+    if reuse_ids and "QuestionID" in bank.columns:
+        rp = bank[bank["QuestionID"].astype(str).isin(reuse_ids) &
+                  ~bank["QuestionID"].astype(str).isin(used_ids)].copy()
+        rp["_use_count"] = rp["QuestionID"].astype(str).map(
+            lambda q: question_usage.get(q, 0))
+        reuse_pool_parts.append(rp)
+
+    # Add Used Blocks
+    if params.allow_used_blocks and params.used_blocks is not None \
+            and not params.used_blocks.empty:
+        ub = params.used_blocks.copy()
+        if dcol not in ub.columns and "Difficulty" in ub.columns:
+            ub = ub.rename(columns={"Difficulty": dcol})
+        if dcol in ub.columns:
+            ub = ub[~ub["QuestionID"].astype(str).isin(used_ids)]
+            ub[dcol] = pd.to_numeric(ub[dcol], errors="coerce").fillna(0.5)
+            ub["_use_count"] = ub.get("Number of used",
+                                       pd.Series(0, index=ub.index))
+            reuse_pool_parts.append(ub)
+
+    if not reuse_pool_parts:
+        return form, warnings
+
+    reuse_pool = pd.concat(reuse_pool_parts, ignore_index=True)
+    reuse_pool[dcol] = pd.to_numeric(reuse_pool[dcol], errors="coerce")
+    lo_r, hi_r = params.diff_range
+    reuse_pool = reuse_pool[(reuse_pool[dcol] >= lo_r) &
+                            (reuse_pool[dcol] <= hi_r)].dropna(subset=[dcol])
+
+    if reuse_pool.empty:
+        return form, warnings
+
+    # Determine swap direction
+    direction = "higher" if current < lo else "lower"
+    if direction == "higher":
+        reuse_pool = reuse_pool.sort_values(
+            [dcol, "_use_count"], ascending=[False, True])
+    else:
+        reuse_pool = reuse_pool.sort_values(
+            [dcol, "_use_count"], ascending=[True, True])
+
+    form = form.copy()
+    max_swaps = max(1, len(form) // 4)
+
+    for _ in range(max_swaps):
+        current = float(pd.to_numeric(
+            form[dcol], errors="coerce").dropna().mean())
+        if _check_scope_mean(form, dcol, mn_range, scope):
+            break
+
+        # Find worst-deviating item
+        valid = form[dcol].notna()
+        if not valid.any(): break
+        diffs = pd.to_numeric(form.loc[valid, dcol])
+        worst_pos = int(diffs.idxmin() if direction == "higher" else diffs.idxmax())
+        worst_diff = float(form.at[worst_pos, dcol])
+
+        # Category constraint
+        cat_col = next((c for c in ("Category","الناتج") if c in form.columns), None)
+        candidates = reuse_pool
+        if cat_col and cat_col in reuse_pool.columns:
+            worst_cat = form.at[worst_pos, cat_col]
+            cat_cands = reuse_pool[reuse_pool[cat_col].astype(str) == str(worst_cat)]
+            if not cat_cands.empty:
+                candidates = cat_cands
+
+        # Filter: must actually help
+        if direction == "higher":
+            candidates = candidates[candidates[dcol] > worst_diff]
+        else:
+            candidates = candidates[candidates[dcol] < worst_diff]
+
+        if candidates.empty: break
+
+        replacement = candidates.iloc[0].copy()
+        rep_qid = str(replacement.get("QuestionID", ""))
+        old_qid = str(form.at[worst_pos, "QuestionID"]) \
+                  if "QuestionID" in form.columns else ""
+
+        reuse_pool = reuse_pool[reuse_pool["QuestionID"].astype(str) != rep_qid]
+        shared = [c for c in replacement.index
+                  if c in form.columns and not c.startswith("_")]
+        for col in shared:
+            form.at[worst_pos, col] = replacement[col]
+
+        used_ids.discard(old_qid); used_ids.add(rep_qid)
+        warnings.append(
+            f"Form {form_number}: fallback-for-difficulty swap "
+            f"diff={worst_diff:.3f}→{float(replacement[dcol]):.3f} "
+            f"(reuse fallback)")
+
+    return form, warnings
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  FEATURE 5 — CHARTS OUTPUT FILE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def write_charts_workbook(
+    results: list[tuple[pd.DataFrame, float, list[str]]],
+    form_names: list[str],
+    dcol: str,
+    domain_col: str,
+    diff_method: str,
+    out_path: Path,
+) -> None:
+    """
+    Feature 5: Generate a dedicated Charts.xlsx with two sheets:
+      Sheet 1 "Exam Level"  — one histogram per form, laid out in a grid
+      Sheet 2 "Domain Level" — per-form, per-domain histograms in rows
+    """
+    from openpyxl import Workbook
+    from openpyxl.chart import BarChart, Reference
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook(); wb.remove(wb.active)
+
+    # ── Colour helpers ────────────────────────────────────────────────────────
+    NAVY_FILL  = PatternFill("solid", fgColor="1F3864")
+    TEAL_FILL  = PatternFill("solid", fgColor="00AECB")
+    TITLE_FONT = Font(bold=True, color="FFFFFF", size=10)
+
+    def _bin_counts(series: pd.Series) -> list[int]:
+        counts = [0] * 10
+        for d in pd.to_numeric(series, errors="coerce").dropna():
+            counts[min(int(float(d) * 10), 9)] += 1
+        return counts
+
+    BIN_LABELS_LOCAL = [f"{i*0.1:.1f}-{(i+1)*0.1:.1f}" for i in range(10)]
+
+    def _write_chart_block(ws, start_row: int, start_col: int,
+                           form_name: str, bin_counts: list[int],
+                           form_mean: float, n_items: int,
+                           chart_title: str) -> None:
+        """Write bin table + bar chart for one block. Returns rows used."""
+        # Title cell
+        tc = ws.cell(row=start_row, column=start_col, value=chart_title)
+        tc.font = Font(bold=True, size=9, color="2D2B6E")
+
+        # Summary row
+        ws.cell(row=start_row+1, column=start_col,
+                value=f"Mean={form_mean:.3f}  N={n_items}  Method={diff_method.upper()}")
+
+        # Bin header
+        ws.cell(row=start_row+2, column=start_col,
+                value="Bin").fill = TEAL_FILL
+        ws.cell(row=start_row+2, column=start_col+1,
+                value="Count").fill = TEAL_FILL
+
+        for i, (lbl, cnt) in enumerate(zip(BIN_LABELS_LOCAL, bin_counts)):
+            ws.cell(row=start_row+3+i, column=start_col,   value=lbl)
+            ws.cell(row=start_row+3+i, column=start_col+1, value=cnt)
+
+        # Bar chart
+        chart = BarChart()
+        chart.type  = "col"
+        chart.title = chart_title
+        chart.y_axis.title = "Count"
+        chart.x_axis.title = "Difficulty Bin"
+        chart.style  = 10
+        chart.width  = 12
+        chart.height = 8
+
+        data_ref = Reference(ws,
+                             min_col=start_col+1, min_row=start_row+2,
+                             max_row=start_row+12)
+        cats_ref = Reference(ws,
+                             min_col=start_col,   min_row=start_row+3,
+                             max_row=start_row+12)
+        chart.add_data(data_ref, titles_from_data=True)
+        chart.set_categories(cats_ref)
+
+        # Place chart below the table (add 2 rows gap)
+        anchor_col = get_column_letter(start_col)
+        anchor_row = start_row + 14
+        ws.add_chart(chart, f"{anchor_col}{anchor_row}")
+
+    # ── Sheet 1: Exam Level ───────────────────────────────────────────────────
+    ws1 = wb.create_sheet("Exam Level")
+    # Header banner
+    ws1.merge_cells("A1:L1")
+    hc = ws1["A1"]
+    hc.value = "STGS — Difficulty Distribution Comparison (Exam Level)"
+    hc.font  = Font(bold=True, color="FFFFFF", size=12)
+    hc.fill  = NAVY_FILL
+    hc.alignment = Alignment(horizontal="center")
+    ws1.row_dimensions[1].height = 20
+
+    # Summary table
+    ws1.cell(row=3, column=1, value="Form ID").fill  = TEAL_FILL
+    ws1.cell(row=3, column=2, value="N Items").fill  = TEAL_FILL
+    ws1.cell(row=3, column=3, value="Mean Diff").fill= TEAL_FILL
+    ws1.cell(row=3, column=4, value="Method").fill   = TEAL_FILL
+    ws1.cell(row=3, column=5, value="Fallback").fill = TEAL_FILL
+    for ri, ((form, mean_d, warns), name) in \
+            enumerate(zip(results, form_names), 4):
+        ws1.cell(row=ri, column=1, value=name)
+        ws1.cell(row=ri, column=2, value=len(form))
+        ws1.cell(row=ri, column=3, value=round(mean_d, 4))
+        ws1.cell(row=ri, column=4, value=diff_method.upper())
+        ws1.cell(row=ri, column=5,
+                 value="Yes" if any("fallback" in w.lower() for w in warns)
+                 else "No")
+
+    # Charts grid: 3 per row
+    CHARTS_PER_ROW = 3
+    COL_SPAN       = 5   # columns per chart block
+    ROW_SPAN       = 32  # rows per chart block
+    chart_data_start = 4 + len(results) + 2
+
+    for fi, ((form, mean_d, _), name) in enumerate(zip(results, form_names)):
+        row_block = fi // CHARTS_PER_ROW
+        col_block = fi %  CHARTS_PER_ROW
+        sr = chart_data_start + row_block * ROW_SPAN
+        sc = 1 + col_block * COL_SPAN
+        bins = _bin_counts(form[dcol]) if dcol in form.columns else [0]*10
+        _write_chart_block(ws1, sr, sc, name, bins, mean_d,
+                           len(form),
+                           f"{name} — Exam Distribution")
+
+    # ── Sheet 2: Domain Level ─────────────────────────────────────────────────
+    ws2 = wb.create_sheet("Domain Level")
+    ws2.merge_cells("A1:L1")
+    hc2 = ws2["A1"]
+    hc2.value = "STGS — Difficulty Distribution Comparison (Domain Level)"
+    hc2.font  = Font(bold=True, color="FFFFFF", size=12)
+    hc2.fill  = NAVY_FILL
+    hc2.alignment = Alignment(horizontal="center")
+    ws2.row_dimensions[1].height = 20
+
+    cur_row = 3
+    for (form, mean_d, warns), name in zip(results, form_names):
+        # Form label
+        lbl = ws2.cell(row=cur_row, column=1, value=f"▶  {name}")
+        lbl.font = Font(bold=True, size=11, color="2D2B6E")
+        cur_row += 1
+
+        if domain_col not in form.columns:
+            cur_row += 2
+            continue
+
+        domains = sorted(form[domain_col].dropna().unique().astype(str))
+        col_offset = 1
+        for dom in domains:
+            sub   = form[form[domain_col].astype(str) == dom]
+            bins  = _bin_counts(sub[dcol]) if dcol in sub.columns else [0]*10
+            dm    = float(pd.to_numeric(sub[dcol], errors="coerce").dropna().mean()) \
+                    if dcol in sub.columns else 0.0
+            _write_chart_block(
+                ws2, cur_row, col_offset,
+                f"{name}·{dom}", bins, dm, len(sub),
+                f"{name} — {dom}")
+            col_offset += COL_SPAN
+
+        cur_row += ROW_SPAN
+
+    wb.save(str(out_path))
+    log.info("Charts workbook → %s", out_path)
 
 
 def _pick_stratified_with_quota(
@@ -1499,25 +2058,26 @@ def assemble_forms(bank: pd.DataFrame,
     """
     Assemble n_forms sharing usage tracking so questions spread.
 
-    Validation now checks BOTH:
-      • Overall form mean within diff_mean_range
-      • Every D-domain's mean within diff_mean_range
-
-    This prevents a domain like V from individually drifting outside the
-    allowed range even when the overall mean passes.
+    Features 2 / 3 / 4 are integrated here:
+      Feature 2 (scope)    → _check_scope_mean() replaces hard-coded domain check
+      Feature 3 (CCT)      → resolve_diff_params() applies CCT profile constraints
+      Feature 4 (fallback) → _fallback_for_difficulty() runs after retries
     """
     usage: dict[str, int] = {}
     results: list[tuple[pd.DataFrame, float, list[str]]] = []
-    mn_range   = params.diff_mean_range
     domain_col = "D" if "D" in bank.columns else "المجال"
 
+    # Feature 3: resolve effective range/mean from Delta or CCT
+    eff_range, eff_mn = resolve_diff_params(params)
+    mn_range = eff_mn
+
     def _passes(form, mean_d):
-        """True if overall mean AND all domain means are within range."""
+        """True when the form satisfies the mean criterion at the chosen scope."""
         if mn_range is None:
             return True
-        if not (mn_range[0] <= mean_d <= mn_range[1]):
-            return False
-        return _domain_means_ok(form, dcol, mn_range, domain_col)
+        # Feature 2: scope-aware check
+        return _check_scope_mean(form, dcol, mn_range,
+                                 params.difficulty_scope, domain_col)
 
     for fidx, name in enumerate(form_names):
         engine = AssemblyEngine(bank, params, dcol, dict(usage))
@@ -1589,6 +2149,26 @@ def assemble_forms(bank: pd.DataFrame,
                     f"not met after {params.max_retries} retries "
                     f"(achieved {best_mean:.3f})."
                 )
+
+        # ── Feature 4: Fallback-for-difficulty (dedicated reuse for mean) ──
+        if not success and params.allow_fallback_reuse and mn_range is not None:
+            intra_ids = set(best_form["QuestionID"].dropna().astype(str).tolist()) \
+                        if "QuestionID" in best_form.columns else set()
+            best_form, fb_warns = _fallback_for_difficulty(
+                best_form, dcol, mn_range,
+                params.difficulty_scope, params,
+                bank, intra_ids, dict(usage),
+                np.random.default_rng((params.rng_seed or 0) + fidx * 31337),
+                fidx + 1,
+            )
+            best_warns.extend(fb_warns)
+            if fb_warns:
+                best_mean = float(pd.to_numeric(
+                    best_form[dcol], errors="coerce").dropna().mean()) \
+                    if not best_form.empty else best_mean
+                success = _passes(best_form, best_mean)
+                log.info("%s: fallback-for-difficulty applied → mean=%.3f [%s]",
+                         name, best_mean, "OK" if success else "still missed")
 
         # Update cross-form usage by QuestionID
         if "QuestionID" in best_form.columns:
@@ -2468,9 +3048,16 @@ class Mode1Window(_BaseMode):
         self.used_blocks_df: Optional[pd.DataFrame] = None
         self._use_ub_var = tk.BooleanVar(value=False)
         self._adaptive_mean_var = tk.BooleanVar(value=False)
+        # Feature 2 — Difficulty scope
+        self._diff_scope_var = tk.StringVar(value="exam")
+        # Feature 3 — Difficulty method
+        self._diff_method_var = tk.StringVar(value="delta")
+        self._cct_profile_var = tk.StringVar(value="Common")
+        # Feature 4 — Fallback-for-difficulty
+        self._fallback_reuse_var = tk.BooleanVar(value=False)
         # Block ID settings
-        self._part_level_var = tk.IntVar(value=1)  # part (Stage1) or level (Stage2/3)
-        self._stage_num_var  = tk.IntVar(value=2)  # 2 = Stage 2, 3 = Stage 3
+        self._part_level_var = tk.IntVar(value=1)
+        self._stage_num_var  = tk.IntVar(value=2)
         self._build(); self.after(80, self._poll)
 
     # ── build ─────────────────────────────────────────────────────────────────
@@ -2592,11 +3179,89 @@ class Mode1Window(_BaseMode):
                                       font=("Segoe UI", 9, "italic"))
         self._ub_stats_lbl.pack(anchor="w")
 
+        # ── Feature 1: Template Import / Export ──────────────────────────────
+        tmpl_frm = tk.LabelFrame(
+            p, text="Exam Template (Feature 1 — Dynamic Exam Creation)",
+            bg=BG_L, fg=BG_D, font=FH, padx=10, pady=8)
+        tmpl_frm.pack(fill="x", pady=(8, 4))
+        tk.Label(tmpl_frm,
+                 text="Import a structured template to create a new exam, "
+                      "or download a blank template to fill in.",
+                 bg=BG_L, fg="#555", font=("Segoe UI", 9)).pack(anchor="w")
+        btn_row = tk.Frame(tmpl_frm, bg=BG_L); btn_row.pack(fill="x", pady=(6,0))
+        _btn(btn_row, "⬆  Import Template",
+             self._import_template, bg=ETEC_BLUE).pack(side="left")
+        _btn(btn_row, "⬇  Download Blank Template",
+             self._export_template, bg=ETEC_NAVY).pack(side="left", padx=8)
+
         _lbl(p, "Categories detected in 'Category' column", bold=True).pack(
             anchor="w", pady=(10, 4))
         self._cat_tree = _treeview(p,
             ["Category","Domain (D)","Count","Mean Difficulty","Min","Max"],
             [160, 140, 60, 120, 65, 65])
+
+    # ── Feature 1: Template Import / Export ───────────────────────────────────
+    def _export_template(self):
+        path = fd.asksaveasfilename(
+            title="Save Exam Template",
+            defaultextension=".xlsx",
+            initialfile="ExamTemplate.xlsx",
+            filetypes=[("Excel","*.xlsx"),("All","*.*")])
+        if not path: return
+        try:
+            export_exam_template(Path(path))
+            mb.showinfo("Exported", f"Template saved to:\n{path}")
+        except Exception as e:
+            mb.showerror("Error", str(e))
+
+    def _import_template(self):
+        path = fd.askopenfilename(
+            title="Import Exam Template",
+            filetypes=[("Excel/CSV","*.xlsx *.xls *.csv"),("All","*.*")])
+        if not path: return
+        exam_name, structure, errors = import_exam_template(Path(path))
+        if errors:
+            mb.showerror("Template Validation Failed",
+                         "\n".join(errors[:10]))
+            return
+
+        # Check if exam already exists
+        existing = exam_name in MODE1_EXAMS
+        if existing:
+            choice = mb.askyesnocancel(
+                "Exam Already Exists",
+                f"An exam named '{exam_name}' already exists.\n\n"
+                f"  Yes    = Overwrite\n"
+                f"  No     = Append categories\n"
+                f"  Cancel = Abort import")
+            if choice is None:
+                return
+            elif choice:   # overwrite
+                MODE1_EXAMS[exam_name] = {}
+            # No = append — existing entries stay
+
+        # Build flat Category → count dict (exam has ONE domain level in MODE1)
+        for domain, cats in structure[exam_name].items():
+            for cat, cnt in cats.items():
+                MODE1_EXAMS.setdefault(exam_name, {})[cat] = cnt
+
+        # Refresh exam combobox
+        self._exam_var.set(exam_name)
+        # Update the options in the exam combobox widget
+        cb = self._exam_cb
+        cb["values"] = list(MODE1_EXAMS.keys())
+        self._populate_subdomain_entries()
+
+        # Preview
+        total = sum(MODE1_EXAMS[exam_name].values())
+        domains_str = ", ".join(structure[exam_name].keys())
+        mb.showinfo(
+            "Template Imported",
+            f"Exam '{exam_name}' loaded successfully!\n\n"
+            f"Domains  : {domains_str}\n"
+            f"Categories: {len(MODE1_EXAMS[exam_name])}\n"
+            f"Total Q  : {total}\n\n"
+            f"The exam template is now active in the Configure tab.")
 
     def _browse_used_blocks(self):
         path = fd.askopenfilename(
@@ -2691,8 +3356,9 @@ class Mode1Window(_BaseMode):
         r0 = tk.Frame(ef, bg=BG_L); r0.pack(fill="x")
         tk.Label(r0, text="Exam type:", bg=BG_L, fg=TXD, font=FB).pack(side="left")
         self._exam_var = tk.StringVar(value=list(MODE1_EXAMS.keys())[0])
-        cb = ttk.Combobox(r0, textvariable=self._exam_var,
+        self._exam_cb  = ttk.Combobox(r0, textvariable=self._exam_var,
                           values=list(MODE1_EXAMS.keys()), state="readonly", width=28)
+        cb = self._exam_cb
         cb.pack(side="left", padx=6)
         cb.bind("<<ComboboxSelected>>", lambda e: self._populate_subdomain_entries())
         _btn(r0, "Apply", self._populate_subdomain_entries, bg=BG_D).pack(side="left", padx=4)
@@ -2765,8 +3431,48 @@ class Mode1Window(_BaseMode):
                       "uses reuse & Used Blocks strategically)",
                  bg=BG_L, fg="#666", font=("Segoe UI", 8, "italic")).pack(side="left")
 
-        self._sim_n = self._le(pf, "Simulation students:", 8, "3000")
-        self._seed  = self._le(pf, "RNG Seed (blank=random):", 9, "")
+        # ── Feature 2: Difficulty Distribution Scope ──────────────────────────
+        scope_frm = tk.LabelFrame(pf, text="Difficulty Scope (Feature 2)",
+                                  bg=BG_L, fg=BG_D, font=FH, padx=8, pady=6)
+        scope_frm.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(6,2))
+        for val, lbl in [("exam","Exam Level"),
+                         ("domain","Domain Level"),
+                         ("category","Category Level")]:
+            tk.Radiobutton(scope_frm, text=lbl, variable=self._diff_scope_var,
+                           value=val, bg=BG_L, fg=TXD, font=FB,
+                           activebackground=BG_L).pack(side="left", padx=10)
+
+        # ── Feature 3: Difficulty Method ──────────────────────────────────────
+        meth_frm = tk.LabelFrame(pf, text="Difficulty Method (Feature 3)",
+                                 bg=BG_L, fg=BG_D, font=FH, padx=8, pady=6)
+        meth_frm.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(2,2))
+        for val, lbl in [("delta","Delta (current)"),("cct","CCT Method")]:
+            tk.Radiobutton(meth_frm, text=lbl, variable=self._diff_method_var,
+                           value=val, bg=BG_L, fg=TXD, font=FB,
+                           activebackground=BG_L,
+                           command=self._on_method_change).pack(side="left", padx=10)
+        self._cct_profile_row = tk.Frame(meth_frm, bg=BG_L)
+        self._cct_profile_row.pack(side="left", padx=10)
+        tk.Label(self._cct_profile_row, text="Profile:",
+                 bg=BG_L, fg=TXD, font=FB).pack(side="left")
+        self._cct_cb = ttk.Combobox(
+            self._cct_profile_row, textvariable=self._cct_profile_var,
+            values=list(CCT_RULES.keys()), state="readonly", width=14)
+        self._cct_cb.pack(side="left", padx=4)
+        self._cct_profile_row.pack_forget()   # hidden until CCT selected
+
+        # ── Feature 4: Fallback for Difficulty ────────────────────────────────
+        fb_frm = tk.Frame(pf, bg=BG_L)
+        fb_frm.grid(row=10, column=0, columnspan=2, sticky="w", pady=(2,4))
+        tk.Checkbutton(fb_frm,
+                       text="Allow Fallback Using Used Blocks to achieve difficulty target  "
+                            "(Feature 4)",
+                       variable=self._fallback_reuse_var,
+                       bg=BG_L, fg=ETEC_PURPLE, font=("Segoe UI", 9, "bold"),
+                       activebackground=BG_L).pack(side="left")
+
+        self._sim_n = self._le(pf, "Simulation students:", 11, "3000")
+        self._seed  = self._le(pf, "RNG Seed (blank=random):", 12, "")
 
         # Save settings button
         _btn(pf, "Save & Preview Settings", self._save_settings,
@@ -2903,6 +3609,14 @@ class Mode1Window(_BaseMode):
                     e = _entry(frm, w=4); e.grid(row=0, column=bi*2+1, padx=2)
                     entries.append(e)
             self._bins_map[cat] = entries
+
+    def _on_method_change(self):
+        """Show/hide CCT profile combobox based on selected difficulty method."""
+        if hasattr(self, "_cct_profile_row"):
+            if self._diff_method_var.get() == "cct":
+                self._cct_profile_row.pack(side="left", padx=10)
+            else:
+                self._cct_profile_row.pack_forget()
 
     def _on_stage(self, *_):
         is_m = "Manually" in self._stage_var.get()
@@ -3069,7 +3783,13 @@ class Mode1Window(_BaseMode):
             f"Partial fill: {'Enabled' if self._partial_var.get() else 'Disabled'}",
             f"Reuse       : {'Enabled — max ' + self._max_reuse_m1.get() + 'x per question' if self._reuse_var.get() else 'Disabled'}",
             f"Used Blocks : {'Enabled' if self._use_ub_var.get() else 'Disabled'}",
-            f"Adaptive MC : {'Enabled' if self._adaptive_mean_var.get() else 'Disabled'}" + bid_preview,
+            f"Adaptive MC : {'Enabled' if self._adaptive_mean_var.get() else 'Disabled'}",
+            f"Diff Scope  : {self._diff_scope_var.get()}",
+            f"Diff Method : {self._diff_method_var.get().upper()}"
+            + (f" / {self._cct_profile_var.get()}"
+               if self._diff_method_var.get()=='cct' else ""),
+            f"Fallback4   : {'Enabled' if self._fallback_reuse_var.get() else 'Disabled'}"
+            + bid_preview,
         ]
         mb.showinfo("Settings Preview", "\n".join(lines))
 
@@ -3204,6 +3924,10 @@ class Mode1Window(_BaseMode):
             used_blocks=self.used_blocks_df if self._use_ub_var.get() else None,
             allow_used_blocks=self._use_ub_var.get(),
             adaptive_mean_control=self._adaptive_mean_var.get(),
+            difficulty_scope=self._diff_scope_var.get(),
+            difficulty_method=self._diff_method_var.get(),
+            cct_profile=self._cct_profile_var.get(),
+            allow_fallback_reuse=self._fallback_reuse_var.get(),
         )
         return {"n_forms": n_forms, "params": params,
                 "n_students": ii(self._sim_n, "Simulation students"),
@@ -3273,6 +3997,16 @@ class Mode1Window(_BaseMode):
             valid = [fa for fa in analyses if fa]
             if valid: write_analysis_workbook(valid, ap)
 
+            # Feature 5: Charts workbook
+            cp = out_dir / "Charts.xlsx"
+            try:
+                diff_method = p["params"].difficulty_method
+                write_charts_workbook(results, names, "Difficulty", "D",
+                                      diff_method, cp)
+            except Exception as ce:
+                self._lg(f"  ⚠ Charts file error: {ce}", "yellow")
+                cp = None
+
             used_ids = set()
             for form, _, _ in results:
                 if "QuestionID" in form.columns:
@@ -3292,6 +4026,7 @@ class Mode1Window(_BaseMode):
             self._lg(f"\n  📁 Output folder   : {out_dir}")
             self._lg(f"  📄 Forms           : {fp.name}")
             self._lg(f"  📊 3PL Analysis    : {ap.name}")
+            if cp: self._lg(f"  📈 Charts          : {cp.name}")
             self._lg(f"  📋 Remaining Qs    : {rp.name}  ({unused_count} questions)")
             self._lg(f"\n  Bank status: {unused_count} unused / "
                      f"{len(self.bank_df)} total questions remain",
@@ -3974,6 +4709,16 @@ class Mode2Window(_BaseMode):
                 usage, fp, mode=2)
             valid = [fa for fa in analyses if fa]
             if valid: write_analysis_workbook(valid, ap)
+
+            # Feature 5: Charts workbook
+            cp = out_dir / "Charts.xlsx"
+            try:
+                diff_method = params.difficulty_method
+                write_charts_workbook(results, names, dcol, "المجال",
+                                      diff_method, cp)
+            except Exception as ce:
+                self._lg(f"  ⚠ Charts file error: {ce}", "yellow")
+                cp = None
 
             used_ids = set()
             for form, _, _ in results:
