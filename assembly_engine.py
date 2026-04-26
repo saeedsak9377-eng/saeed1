@@ -18,6 +18,30 @@ Key design decisions
     Stage 2 – relax mean tolerance by 50 %
     Stage 3 – relax bins by ±0.2 and allow pair-level substitution
     Stage 4 – global pool fallback (least-used, closest difficulty)
+
+Used-Blocks fallback (last resort)
+====================================
+When the main unused question pool for a target block is fully exhausted,
+_fallback_select may reuse already-used questions from the "Used Blocks"
+dataset (i.e. items whose usage_count > 0).
+
+Strict Stage-Level matching rule
+---------------------------------
+Reuse is restricted exclusively to questions that share the same Stage AND
+Level/Part as the block currently being assembled.  Matching is based on the
+block's QuestionID prefix (the leading dot-delimited segments that encode
+stage and level, e.g. "GAT-2.1" from "GAT-2.1.xxxxx").
+
+The number of prefix segments used for matching is controlled by
+AssemblyConfig.block_prefix_segments (default 2).  Given a QuestionID like
+"GAT-2.1.045", splitting on "." yields ["GAT-2", "1", "045"]; the first 2
+segments joined back with "." give the prefix "GAT-2.1", which is what
+every candidate in the fallback pool must also start with.
+
+Cross-stage or cross-level borrowing is never permitted under any
+circumstance, even when the same-prefix reuse pool is also exhausted
+(in that case the fallback simply returns nothing rather than violating
+the rule).
 """
 
 from __future__ import annotations
@@ -79,6 +103,11 @@ class AssemblyConfig:
     allow_reuse_across_forms: bool = False
     relaxation_stages: int = 4
     rng_seed: Optional[int] = None
+
+    # Used-Blocks fallback: number of leading dot-delimited QuestionID
+    # segments that define a block's Stage-Level prefix for strict matching.
+    # E.g. with block_prefix_segments=2, "GAT-2.1.045" → prefix "GAT-2.1".
+    block_prefix_segments: int = 2
 
 
 @dataclass
@@ -285,6 +314,12 @@ class AssemblyEngine:
         for pair_idx, pair in enumerate(pairs):
             pair_pool = self._get_pool(pair.pair_key, selected_ids)
 
+            # Derive the Stage-Level block prefix from this pair's question IDs.
+            # This prefix is passed to _fallback_select so that, if last-resort
+            # reuse from the Used-Blocks dataset is needed, only questions from
+            # the exact same Stage and Level/Part are eligible.
+            block_prefix = self._block_prefix_for_pair(pair.pair_key)
+
             for bin_idx, bin_spec in enumerate(bins):
                 needed = pair_bin_matrix[pair_idx][bin_idx]
                 if needed == 0:
@@ -314,6 +349,7 @@ class AssemblyEngine:
                         bin_spec=bin_spec,
                         already_selected=selected_ids,
                         form_idx=form_idx,
+                        block_prefix=block_prefix,
                     )
                     all_rows.extend(fallback_rows)
                     selected_ids.update(fallback_ids)
@@ -351,6 +387,7 @@ class AssemblyEngine:
                     bin_spec=bin_spec,
                     already_selected=selected_ids,
                     form_idx=form_idx,
+                    block_prefix=None,  # no pair context; prefix matching not applicable
                 )
                 all_rows.extend(fallback_rows)
                 selected_ids.update(fallback_ids)
@@ -465,16 +502,69 @@ class AssemblyEngine:
         selected_ids = set(top["QuestionID"].astype(str).tolist())
         return [top], selected_ids
 
+    # ------------------------------------------------------------------
+    # Block-prefix helpers (Stage-Level matching for Used-Blocks fallback)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _derive_prefix(question_id: str, segments: int) -> str:
+        """
+        Return the leading *segments* dot-delimited parts of *question_id*.
+
+        Examples (segments=2):
+            "GAT-2.1.045"  → "GAT-2.1"
+            "GAT-1.2.007"  → "GAT-1.2"
+            "PLAIN"        → "PLAIN"   (fewer parts than requested → whole ID)
+        """
+        parts = str(question_id).split(".")
+        return ".".join(parts[:segments])
+
+    def _block_prefix_for_pair(self, pair_key: str) -> Optional[str]:
+        """
+        Infer a Stage-Level prefix from the first QuestionID in the pair's
+        pool within the bank.  Returns None when no questions exist for the
+        pair or when the bank lacks a QuestionID column.
+        """
+        if "QuestionID" not in self.bank.columns:
+            return None
+        pair_bank = self.bank[self.bank["_pair_key"] == pair_key]
+        if pair_bank.empty:
+            return None
+        first_id = str(pair_bank["QuestionID"].iloc[0])
+        return self._derive_prefix(first_id, self.config.block_prefix_segments)
+
+    def _filter_by_prefix(self, pool: pd.DataFrame, prefix: Optional[str]) -> pd.DataFrame:
+        """
+        Retain only rows whose QuestionID starts with *prefix* + ".".
+        If *prefix* is None, the pool is returned unchanged (no restriction).
+        """
+        if prefix is None or pool.empty:
+            return pool
+        match_prefix = prefix + "."
+        mask = pool["QuestionID"].astype(str).str.startswith(match_prefix)
+        # Also include exact matches (IDs that equal the prefix with no trailing dot)
+        mask |= pool["QuestionID"].astype(str) == prefix
+        return pool[mask]
+
     def _fallback_select(
         self,
         shortage: int,
         bin_spec: BinSpec,
         already_selected: set[str],
         form_idx: int,
+        block_prefix: Optional[str] = None,
     ) -> tuple[list[pd.DataFrame], set[str]]:
         """
         Global fallback: pick least-used items with closest difficulty,
-        ignoring pair/bin constraints entirely.
+        ignoring pair/bin constraints.
+
+        Used-Blocks last-resort path
+        ----------------------------
+        When the unused pool is exhausted and reuse becomes necessary, only
+        questions whose QuestionID shares the exact same Stage-Level prefix as
+        *block_prefix* are eligible.  Cross-stage or cross-level reuse is
+        never allowed.  If no same-prefix questions are available in the
+        Used-Blocks dataset either, the fallback returns nothing.
         """
         global_pool = self.bank[
             ~self.bank["QuestionID"].isin(already_selected)
@@ -485,10 +575,28 @@ class AssemblyEngine:
             global_pool = global_pool[~global_pool["QuestionID"].isin(used)]
 
         if global_pool.empty:
-            # Last resort: allow reuse
-            global_pool = self.bank[
+            # ── Used-Blocks last-resort path ──────────────────────────────
+            # Rebuild from the full bank (including already-used questions)
+            # but enforce strict Stage-Level prefix matching.
+            used_blocks_pool = self.bank[
                 ~self.bank["QuestionID"].isin(already_selected)
             ].copy()
+
+            # Enforce exact Stage-Level match — no cross-stage/level reuse
+            used_blocks_pool = self._filter_by_prefix(used_blocks_pool, block_prefix)
+
+            if used_blocks_pool.empty:
+                # Same-prefix pool is also exhausted; do not borrow from other
+                # stages or levels — return nothing rather than violate the rule.
+                if block_prefix is not None:
+                    logger.warning(
+                        "Form %d fallback: Used-Blocks pool for prefix '%s' is "
+                        "exhausted. No cross-stage/level substitution will be made.",
+                        form_idx + 1, block_prefix,
+                    )
+                return [], set()
+
+            global_pool = used_blocks_pool
 
         if global_pool.empty:
             return [], set()
@@ -498,7 +606,7 @@ class AssemblyEngine:
         usage_vals = np.array(
             [self.usage_counts.get(str(q), 0) for q in global_pool["QuestionID"]], dtype=float
         )
-        # Sort by usage (asc) then distance (asc)
+        # Sort by usage ascending (least-used first), then distance ascending
         order = np.lexsort((dist, usage_vals))
         top = global_pool.iloc[order[:shortage]]
         ids = set(top["QuestionID"].astype(str).tolist())
@@ -558,10 +666,12 @@ def build_config_from_gui(params: dict) -> AssemblyConfig:
     Build an AssemblyConfig from a flat dict produced by the GUI.
     Expected keys (all optional with defaults):
         n_forms, questions_per_form, target_mean_b, target_min_b, target_max_b,
-        bins          → list of {"low": float, "high": float, "proportion": float}
-        pair_requirements → list of {"pair_key": str, "الناتج": str, "المؤشر": str, "count": int}
+        bins               → list of {"low": float, "high": float, "proportion": float}
+        pair_requirements  → list of {"pair_key": str, "الناتج": str, "المؤشر": str, "count": int}
         w_difficulty, w_bin, w_usage, w_random,
-        allow_reuse_across_forms, rng_seed
+        allow_reuse_across_forms, rng_seed,
+        block_prefix_segments → int (default 2); controls Stage-Level prefix depth
+                                for Used-Blocks fallback matching.
     """
     bins_raw = params.get("bins", [])
     bins = [(b["low"], b["high"], b["proportion"]) for b in bins_raw]
@@ -580,4 +690,5 @@ def build_config_from_gui(params: dict) -> AssemblyConfig:
         w_random=float(params.get("w_random", 0.15)),
         allow_reuse_across_forms=bool(params.get("allow_reuse_across_forms", False)),
         rng_seed=params.get("rng_seed", None),
+        block_prefix_segments=int(params.get("block_prefix_segments", 2)),
     )
