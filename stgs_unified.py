@@ -841,6 +841,31 @@ def resolve_diff_params(params: "AssemblyParams") -> tuple:
 #  FEATURE 4 — FALLBACK-FOR-DIFFICULTY (controlled reuse targeting mean)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _filter_ub_by_prefix(
+        used_blocks: pd.DataFrame,
+        block_prefix: Optional[str],
+) -> pd.DataFrame:
+    """
+    Shared helper: filter Used Blocks DataFrame to only rows whose
+    Block-ID belongs to the exact Stage + Level/Part identified by
+    `block_prefix` (e.g. "GAT-2.1", "GAT-1.2").
+
+    If `block_prefix` is None or the 'Block-ID' column is absent the
+    full DataFrame is returned unchanged (backward-compatible).
+
+    The match is a prefix + "." check so "GAT-2.1" matches "GAT-2.1.001"
+    but never "GAT-2.10.001" or "GAT-2.11.001".
+    """
+    if block_prefix is None or used_blocks.empty:
+        return used_blocks
+    if "Block-ID" not in used_blocks.columns:
+        return used_blocks
+    mask = used_blocks["Block-ID"].astype(str).str.startswith(
+        block_prefix + "."
+    )
+    return used_blocks[mask].copy()
+
+
 def _fallback_for_difficulty(
         form: pd.DataFrame,
         dcol: str,
@@ -852,6 +877,7 @@ def _fallback_for_difficulty(
         question_usage: dict,
         rng: np.random.Generator,
         form_number: int,
+        block_prefix: Optional[str] = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """
     Feature 4 — controlled reuse specifically to hit the difficulty mean.
@@ -886,18 +912,24 @@ def _fallback_for_difficulty(
             lambda q: question_usage.get(q, 0))
         reuse_pool_parts.append(rp)
 
-    # Add Used Blocks
+    # Add Used Blocks — STRICT stage-level filter applied first
     if params.allow_used_blocks and params.used_blocks is not None \
             and not params.used_blocks.empty:
-        ub = params.used_blocks.copy()
-        if dcol not in ub.columns and "Difficulty" in ub.columns:
-            ub = ub.rename(columns={"Difficulty": dcol})
-        if dcol in ub.columns:
-            ub = ub[~ub["QuestionID"].astype(str).isin(used_ids)]
-            ub[dcol] = pd.to_numeric(ub[dcol], errors="coerce").fillna(0.5)
-            ub["_use_count"] = ub.get("Number of used",
-                                       pd.Series(0, index=ub.index))
-            reuse_pool_parts.append(ub)
+        ub = _filter_ub_by_prefix(params.used_blocks, block_prefix)
+        if ub.empty and block_prefix:
+            warnings.append(
+                f"Form {form_number}: _fallback_for_difficulty — Used Blocks has "
+                f"no records matching stage-level '{block_prefix}'; "
+                f"cross-stage reuse is forbidden.")
+        elif not ub.empty:
+            if dcol not in ub.columns and "Difficulty" in ub.columns:
+                ub = ub.rename(columns={"Difficulty": dcol})
+            if dcol in ub.columns:
+                ub = ub[~ub["QuestionID"].astype(str).isin(used_ids)]
+                ub[dcol] = pd.to_numeric(ub[dcol], errors="coerce").fillna(0.5)
+                ub["_use_count"] = ub.get("Number of used",
+                                           pd.Series(0, index=ub.index))
+                reuse_pool_parts.append(ub)
 
     if not reuse_pool_parts:
         return form, warnings
@@ -1896,6 +1928,7 @@ def _adaptive_mean_correction(
         question_usage: dict,
         rng: np.random.Generator,
         form_number: int,
+        block_prefix: Optional[str] = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """
     Adaptive Mean Control — post-assembly correction pass.
@@ -1959,20 +1992,25 @@ def _adaptive_mean_correction(
             lambda q: question_usage.get(q, 0))
         correction_pool_parts.append(reuse_pool)
 
-    # Source 3: Used Blocks dataset
+    # Source 3: Used Blocks dataset — STRICT stage-level filter applied first
     if params.allow_used_blocks and params.used_blocks is not None \
             and not params.used_blocks.empty:
-        ub = params.used_blocks.copy()
-        # Rename Difficulty column if needed
-        if dcol not in ub.columns and "Difficulty" in ub.columns:
-            ub = ub.rename(columns={"Difficulty": dcol})
-        if dcol in ub.columns:
-            ub = ub[~ub["QuestionID"].astype(str).isin(intra_form_used_ids)]
-            ub[dcol] = pd.to_numeric(ub[dcol], errors="coerce").fillna(0.5)
-            ub["_source"]    = "used_blocks"
-            ub["_use_count"] = ub.get("Number of used",
-                                       pd.Series(0, index=ub.index))
-            correction_pool_parts.append(ub)
+        ub = _filter_ub_by_prefix(params.used_blocks, block_prefix)
+        if ub.empty and block_prefix:
+            warnings.append(
+                f"Form {form_number}: _adaptive_mean_correction — Used Blocks has "
+                f"no records matching stage-level '{block_prefix}'; "
+                f"cross-stage reuse is forbidden.")
+        elif not ub.empty:
+            if dcol not in ub.columns and "Difficulty" in ub.columns:
+                ub = ub.rename(columns={"Difficulty": dcol})
+            if dcol in ub.columns:
+                ub = ub[~ub["QuestionID"].astype(str).isin(intra_form_used_ids)]
+                ub[dcol] = pd.to_numeric(ub[dcol], errors="coerce").fillna(0.5)
+                ub["_source"]    = "used_blocks"
+                ub["_use_count"] = ub.get("Number of used",
+                                           pd.Series(0, index=ub.index))
+                correction_pool_parts.append(ub)
 
     if not correction_pool_parts:
         return form, warnings
@@ -2155,6 +2193,7 @@ def assemble_forms(bank: pd.DataFrame,
                 np.random.default_rng(
                     (params.rng_seed or 0) + fidx * 999),
                 fidx + 1,
+                block_prefix=block_prefix,
             )
             corr_mean = float(pd.to_numeric(
                 corr_form[dcol], errors="coerce").dropna().mean()) \
@@ -2188,6 +2227,7 @@ def assemble_forms(bank: pd.DataFrame,
                         bank, intra2, dict(usage),
                         np.random.default_rng(seed + 7),
                         fidx + 1,
+                        block_prefix=block_prefix,
                     )
                     w2.extend(cw)
                     mean2 = float(pd.to_numeric(
@@ -2221,6 +2261,7 @@ def assemble_forms(bank: pd.DataFrame,
                 bank, intra_ids, dict(usage),
                 np.random.default_rng((params.rng_seed or 0) + fidx * 31337),
                 fidx + 1,
+                block_prefix=block_prefix,
             )
             best_warns.extend(fb_warns)
             if fb_warns:
