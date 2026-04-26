@@ -1502,13 +1502,17 @@ class AssemblyEngine:
 
     def __init__(self, bank: pd.DataFrame, params: AssemblyParams,
                  dcol: str,
-                 usage: Optional[dict] = None):
+                 usage: Optional[dict] = None,
+                 block_prefix: Optional[str] = None):
         self.bank   = bank.copy().reset_index(drop=True)
         self.params = params
         self.dcol   = dcol
         self.rng    = np.random.default_rng(params.rng_seed)
         # usage[QuestionID_str] = number of forms it has been used in
         self.question_usage: dict[str, int] = usage or {}
+        # Block prefix for Used Blocks stage-level filtering (e.g. "GAT-2.1")
+        # Derived from the block ID being assembled: "GAT-2.1.006" → "GAT-2.1"
+        self.block_prefix: Optional[str] = block_prefix
 
     # ── public ────────────────────────────────────────────────────────────────
     def assemble_one_form(self, form_number: int
@@ -1687,19 +1691,58 @@ class AssemblyEngine:
                     if need_more <= 0:
                         continue
 
-                    # Pull from Used Blocks: filter by category, diff range,
-                    # exclude this-form IDs, sort by least-used first
+                    # Pull from Used Blocks: strictly filtered by Stage-Level prefix,
+                    # then by category and difficulty range.
+                    # NO relaxation of the stage-level filter is ever allowed.
                     ub = p.used_blocks.copy()
+
+                    # ── STRICT Stage-Level filter (new requirement) ───────────
+                    # Only reuse questions that came from the EXACT same
+                    # Stage and Level/Part as the block being assembled.
+                    #
+                    # self.block_prefix is derived from the current block ID:
+                    #   "GAT-2.1.006"  →  prefix = "GAT-2.1"
+                    #   "GAT-1.2.003"  →  prefix = "GAT-1.2"
+                    #
+                    # If no Block-ID column exists or no prefix is set,
+                    # fall through to category/difficulty filtering only
+                    # (backward-compatible with banks that predate block IDs).
+                    if (self.block_prefix and
+                            "Block-ID" in ub.columns):
+                        # Keep only rows whose Block-ID starts with this prefix
+                        prefix_filter = (
+                            ub["Block-ID"].astype(str)
+                            .str.startswith(self.block_prefix + ".")
+                        )
+                        ub_stage = ub[prefix_filter]
+
+                        if ub_stage.empty:
+                            # Strictly no candidates for this stage-level —
+                            # do NOT borrow from other stages/levels.
+                            all_warnings.append(
+                                f"Form {form_number}: Used Blocks has no questions "
+                                f"matching stage-level '{self.block_prefix}' for "
+                                f"'{slot.label}' — {need_more} item(s) cannot be "
+                                f"filled from fallback (cross-stage reuse forbidden).")
+                            continue
+                        ub = ub_stage   # continue with stage-filtered pool only
 
                     # Exclude already in this form
                     if "QuestionID" in ub.columns:
                         ub = ub[~ub["QuestionID"].astype(str).isin(intra_form_used_ids)]
 
-                    # Filter by category if column exists
+                    # Filter by category if column exists (within stage-filtered pool)
                     if "Category" in ub.columns and slot.label:
                         ub_cat = ub[ub["Category"].astype(str) == str(slot.label)]
                         if ub_cat.empty:
-                            ub_cat = ub   # relax category filter
+                            # No category match within this stage-level —
+                            # do NOT fall back to other categories inside the stage
+                            all_warnings.append(
+                                f"Form {form_number}: No Used Blocks match "
+                                f"stage-level '{self.block_prefix or 'n/a'}' "
+                                f"AND category '{slot.label}' — "
+                                f"{need_more} item(s) skipped.")
+                            continue
                     else:
                         ub_cat = ub
 
@@ -1711,14 +1754,21 @@ class AssemblyEngine:
                             (pd.to_numeric(ub_cat[dcol_ub], errors="coerce") >= lo) &
                             (pd.to_numeric(ub_cat[dcol_ub], errors="coerce") <= hi)
                         ]
-
-                    if ub_cat.empty:
-                        ub_cat = ub   # relax all filters
+                        # NOTE: do NOT relax difficulty range —
+                        # if nothing is left the slot stays empty with a warning
+                        if ub_cat.empty:
+                            all_warnings.append(
+                                f"Form {form_number}: Used Blocks candidates for "
+                                f"stage-level '{self.block_prefix or 'n/a'}' / "
+                                f"'{slot.label}' are all outside the difficulty "
+                                f"range [{lo},{hi}] — {need_more} item(s) skipped.")
+                            continue
 
                     if ub_cat.empty:
                         all_warnings.append(
                             f"Form {form_number}: Used Blocks also exhausted for "
-                            f"'{slot.label}' — {need_more} placeholders added.")
+                            f"'{slot.label}' (stage-level '{self.block_prefix or 'n/a'}') "
+                            f"— {need_more} placeholders added.")
                         continue
 
                     # Sort by Number of used ascending (least-used first)
@@ -2080,7 +2130,17 @@ def assemble_forms(bank: pd.DataFrame,
                                  params.difficulty_scope, domain_col)
 
     for fidx, name in enumerate(form_names):
-        engine = AssemblyEngine(bank, params, dcol, dict(usage))
+        # Derive stage-level prefix from the block name for Used Blocks filtering.
+        # Block IDs follow the pattern  CODE-Stage.Level.Number
+        # e.g. "GAT-2.1.006" → prefix "GAT-2.1"
+        #      "GAT-1.2.003" → prefix "GAT-1.2"
+        #      "Form_1"      → None (no filtering, backward compatible)
+        import re as _re
+        _m = _re.match(r'^([A-Za-z]+-\d+\.\d+)\.\d+$', str(name))
+        block_prefix = _m.group(1) if _m else None
+
+        engine = AssemblyEngine(bank, params, dcol, dict(usage),
+                                block_prefix=block_prefix)
         best_form, best_mean, best_warns = engine.assemble_one_form(fidx + 1)
 
         # ── Adaptive Mean Control (runs BEFORE the retry loop) ─────────────
@@ -2115,7 +2175,8 @@ def assemble_forms(bank: pd.DataFrame,
                     "rng_seed": seed,
                     "diff_mean_range": None,
                 })
-                eng2 = AssemblyEngine(bank, p2, dcol, dict(usage))
+                eng2 = AssemblyEngine(bank, p2, dcol, dict(usage),
+                                      block_prefix=block_prefix)
                 form2, mean2, w2 = eng2.assemble_one_form(fidx + 1)
 
                 # Run adaptive correction on each retry attempt too
