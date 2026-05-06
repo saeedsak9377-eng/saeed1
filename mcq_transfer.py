@@ -2,19 +2,47 @@
 """
 mcq_transfer.py — MCQ Bank Transfer Tool
 =========================================
-Copies every multiple-choice question from a PEA-format source document into
-an Arabic Question-Bank template document.
+Transfers every MCQ question from a PEA-format source document into a
+paragraph-structured Arabic question-bank output document.
 
-Handles:
-  • Plain text (any font / formatting)
-  • OMML math equations  (copied as raw XML – equations never break)
-  • Embedded images / charts (relationship IDs are re-mapped automatically)
-  • All four options  (A→أ  B→ب  C→ت  D→ث)
-  • Correct-answer star (*) placed in the star column
-  • Unlimited questions  (template block is cloned for each question)
+Source document format (PEA / EXAMKEY)
+---------------------------------------
+Table 0 (EXAMKEY) columns:
+    0  Seq          – sequential number (1, 2, 3 …)
+    1  Question ID  – internal reference  (e.g. "578621 (3)")
+    2  External ID  – formal question code (e.g. "TSQ10084-01") ← رمز السؤال
+    3  Blueprint
+    4  Answer       – correct option  (A / B / C / D)
+    5  Status
 
-Usage:
-    python mcq_transfer.py          # opens the GUI
+Body paragraphs following the EXAMKEY table:
+    "QUESTION N"
+    <question body lines>
+    "A. <option text>"
+    "B. <option text>"
+    "C. <option text>"
+    "D. <option text>"
+
+Output document format (mirrors the Arabic question-bank template)
+------------------------------------------------------------------
+    سري للغاية | Top Secret
+    سؤال رقم: N
+    رمز السؤال : TSQ10084-01
+    نص السؤال :
+    <question body paragraphs – text / math / images preserved>
+    الجواب الصحيح (*)
+    نص الاجابة\t\tرقم الاجابة
+    [* ]<option A text>\t\tأ
+    [* ]<option B text>\t\tب
+    [* ]<option C text>\t\tت
+    [* ]<option D text>\t\tث
+    ── page break ──
+
+The star prefix  *  appears only on the correct-answer option.
+
+Usage
+-----
+    python mcq_transfer.py        # opens the GUI
 """
 
 import os
@@ -30,13 +58,8 @@ from docx.oxml import OxmlElement
 #  CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-# English option letter → Arabic option letter used in the template
-OPTION_MAP: dict = {
-    'A': 'أ',
-    'B': 'ب',
-    'C': 'ت',
-    'D': 'ث',
-}
+# English option letter → Arabic option letter
+OPTION_MAP: dict = {'A': 'أ', 'B': 'ب', 'C': 'ت', 'D': 'ث'}
 OPTION_MAP_REV: dict = {v: k for k, v in OPTION_MAP.items()}
 
 # XML namespace URIs
@@ -45,14 +68,20 @@ NS_WORD = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 NS_REL  = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 EMBED_ATTR = f'{{{NS_REL}}}embed'
 
-# Lines in the source document to silently ignore
+# Boilerplate lines in the source document that should be silently skipped
 SKIP_PHRASES = (
     "REFER TO THE FOLLOWING",
     "أسئلة الاختيار",
     "فيما يلي سؤال",
     "أسئلة المقارنة",
     "EXHIBIT",
+    "% of times",           # distribution statistics block in the header
 )
+
+# EXAMKEY table column indices
+COL_SEQ     = 0
+COL_EXT_ID  = 2   # External ID → goes into  رمز السؤال
+COL_ANSWER  = 4   # Correct answer letter (A / B / C / D)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,55 +92,49 @@ def extract_exam_key(doc) -> dict:
     """
     Read the EXAMKEY table (first table in the source document).
 
-    Expected column layout (0-indexed):
-        col 0 – sequential number  (1, 2, 3 …)
-        col 1 – question ID        (e.g. "TSQ10084-01")
-        col 4 – correct answer     (A / B / C / D)
-
     Returns
     -------
     dict  {question_number (int) →
-               {'id': str, 'answer': str (Arabic letter, e.g. 'ب')}}
+               {'id': External_ID (str), 'answer': Arabic_letter (str)}}
     """
     if not doc.tables:
         raise ValueError(
             "Source document has no tables.\n"
-            "Expected the EXAMKEY as the very first table."
+            "Expected the EXAMKEY as the very first table with columns:\n"
+            "  Seq | Question ID | External ID | Blueprint | Answer | Status"
         )
 
     key_data: dict = {}
-    for row in doc.tables[0].rows[1:]:      # row[0] = header – skip it
+    for row in doc.tables[0].rows[1:]:   # row 0 = header — skip
         cells = row.cells
-        if len(cells) < 5:
+        if len(cells) <= max(COL_SEQ, COL_EXT_ID, COL_ANSWER):
             continue
-        seq      = cells[0].text.strip()
-        q_id     = cells[1].text.strip()
-        ans_eng  = cells[4].text.strip().upper()
+        seq     = cells[COL_SEQ].text.strip()
+        ext_id  = cells[COL_EXT_ID].text.strip()
+        ans_eng = cells[COL_ANSWER].text.strip().upper()
         if seq.isdigit():
             key_data[int(seq)] = {
-                'id':     q_id,
+                'id':     ext_id,
                 'answer': OPTION_MAP.get(ans_eng, ''),
             }
     return key_data
 
 
 def _para_has_content(para) -> bool:
-    """Return True when a paragraph carries visible or embedded content."""
+    """True when a paragraph carries visible text or an embedded element."""
     if para.text.strip():
         return True
     el = para._element
-    has_math    = bool(el.xpath('.//m:oMath',   namespaces={'m': NS_MATH}))
-    has_drawing = bool(el.xpath('.//w:drawing', namespaces={'w': NS_WORD}))
-    return has_math or has_drawing
+    return (
+        bool(el.xpath('.//m:oMath',   namespaces={'m': NS_MATH})) or
+        bool(el.xpath('.//w:drawing', namespaces={'w': NS_WORD}))
+    )
 
 
 def parse_questions(doc) -> dict:
     """
-    Walk every paragraph in the source document and group them into questions.
-
-    A question block begins at "QUESTION N" and contains:
-        • body paragraphs  (everything before the first option)
-        • option A … D paragraphs  (everything under each "X. …" marker)
+    Walk every paragraph in the source document body and group paragraphs
+    into question blocks.
 
     Returns
     -------
@@ -119,7 +142,7 @@ def parse_questions(doc) -> dict:
                {'body': [...], 'A': [...], 'B': [...], 'C': [...], 'D': [...]}}
     """
     questions:       dict = {}
-    current_q:       int  = None   # active question number
+    current_q:       int  = None
     current_section: str  = None   # 'body' | 'A' | 'B' | 'C' | 'D'
 
     re_question = re.compile(r'^QUESTION\s+(\d+)', re.IGNORECASE)
@@ -128,29 +151,27 @@ def parse_questions(doc) -> dict:
     for para in doc.paragraphs:
         text = para.text.strip()
 
-        # Completely blank paragraph with no embedded content → skip
+        # Skip completely blank paragraphs with no embedded content
         if not text and not _para_has_content(para):
             continue
 
         # ── New QUESTION header ──────────────────────────────────────────────
         m = re_question.match(text)
         if m:
-            current_q      = int(m.group(1))
+            current_q       = int(m.group(1))
             current_section = 'body'
-            questions[current_q] = {
-                'body': [], 'A': [], 'B': [], 'C': [], 'D': [],
-            }
+            questions[current_q] = {'body': [], 'A': [], 'B': [], 'C': [], 'D': []}
             continue
 
-        # Nothing active yet
+        # Nothing active yet (header boilerplate before first QUESTION)
         if current_q is None:
             continue
 
-        # Boilerplate / instructional lines – discard
+        # Skip boilerplate / instructional lines
         if any(phrase in text for phrase in SKIP_PHRASES):
             continue
 
-        # ── Option header  (A.  /  B.  /  C.  /  D.) ────────────────────────
+        # ── Option header line  (A. / B. / C. / D.) ─────────────────────────
         m = re_option.match(text)
         if m:
             letter = m.group(1).upper()
@@ -158,7 +179,7 @@ def parse_questions(doc) -> dict:
             questions[current_q][letter].append(para)
             continue
 
-        # ── Regular content ──────────────────────────────────────────────────
+        # ── Regular content ───────────────────────────────────────────────────
         if current_section:
             questions[current_q][current_section].append(para)
 
@@ -166,15 +187,13 @@ def parse_questions(doc) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  PHASE 2 – XML SURGERY  (text / math / images)
+#  PHASE 2 – XML SURGERY  (preserve text / OMML math / images)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _transfer_image_rels(p_xml, source_doc, target_doc):
     """
-    For every r:embed attribute inside p_xml:
-      1. Locate the image Part in source_doc.
-      2. Add it to target_doc (returns a fresh rId).
-      3. Rewrite the attribute in-place so the image resolves correctly.
+    Re-map every  r:embed  relationship inside p_xml from source to target.
+    Called after deep-copying a paragraph that may contain embedded images.
     """
     for elem in p_xml.iter():
         if EMBED_ATTR in elem.attrib:
@@ -184,279 +203,170 @@ def _transfer_image_rels(p_xml, source_doc, target_doc):
                 new_rid = target_doc.part.relate_to(rel.target_part, rel.reltype)
                 elem.attrib[EMBED_ATTR] = new_rid
             except (KeyError, AttributeError):
-                pass    # best-effort; image may still render via the old rId
+                pass    # best-effort; image may still render via the original rId
 
 
-def inject_paragraphs_into_cell(source_paras, target_cell, source_doc, target_doc):
+def _append_to_body(doc, p_elem):
     """
-    Replace the contents of target_cell with the paragraphs in source_paras.
-
-    Each source paragraph is deep-copied at the XML level, which preserves:
-      • character formatting (bold, italic, font, colour …)
-      • OMML math equations  (the <m:oMath> subtree is copied verbatim)
-      • Inline / floating images  (relationships are re-mapped to target_doc)
+    Insert a  <w:p>  element into the document body, just before the
+    final  <w:sectPr>  so page-setup properties are preserved.
     """
-    tc = target_cell._tc
+    body    = doc.element.body
+    sect_pr = body.find(qn('w:sectPr'))
+    if sect_pr is not None:
+        body.insert(list(body).index(sect_pr), p_elem)
+    else:
+        body.append(p_elem)
 
-    # Clear existing cell content
-    for node in list(tc.findall(qn('w:p'))):
-        tc.remove(node)
-    for node in list(tc.findall(qn('w:tbl'))):
-        tc.remove(node)
 
-    real_paras = [p for p in source_paras if _para_has_content(p)]
+def _copy_source_para(doc, src_para, source_doc):
+    """
+    Deep-copy a source paragraph (with math equations and images intact)
+    and append it to doc.
+    """
+    new_p = deepcopy(src_para._element)
+    _transfer_image_rels(new_p, source_doc, doc)
+    _append_to_body(doc, new_p)
 
-    if not real_paras:
-        tc.append(OxmlElement('w:p'))   # Word requires ≥1 paragraph per cell
+
+def _strip_option_letter_from_xml(p_elem):
+    """
+    Remove the leading  'A. '  /  'B. '  text from the first run of a
+    copied option paragraph.  Only touches the very first  <w:t>  node.
+    """
+    for run in p_elem.findall(qn('w:r')):
+        for t in run.findall(qn('w:t')):
+            if t.text:
+                cleaned = re.sub(r'^[A-D]\.\s*', '', t.text, flags=re.IGNORECASE)
+                if cleaned != t.text:
+                    t.text = cleaned
+                    if cleaned:
+                        t.set(qn('xml:space'), 'preserve')
+                    else:
+                        # Run is now empty — remove it entirely
+                        run.getparent().remove(run)
+                return   # only process the first text element
+
+
+def _build_option_para(doc, option_paras, arabic_letter, is_correct, source_doc):
+    """
+    Build and append one option row paragraph with the format:
+
+        [* ]<option content>\\t\\t<arabic_letter>
+
+    The  *  prefix appears only when  is_correct  is True.
+    Option content is copied via deep-XML so math equations and images survive.
+    """
+    if not option_paras:
+        # No content for this option — show the label placeholder
+        doc.add_paragraph(f"\t\t{arabic_letter}")
         return
 
-    for src in real_paras:
-        new_p = deepcopy(src._element)
-        _transfer_image_rels(new_p, source_doc, target_doc)
-        tc.append(new_p)
+    # Deep-copy the first (and usually only) option paragraph
+    new_p = deepcopy(option_paras[0]._element)
+    _transfer_image_rels(new_p, source_doc, doc)
 
+    # Strip the  'A. '  letter prefix from the copied text
+    _strip_option_letter_from_xml(new_p)
 
-def _set_cell_text(cell, text: str):
-    """Overwrite a cell with a single plain-text string."""
-    tc = cell._tc
-    for node in list(tc.findall(qn('w:p'))):
-        tc.remove(node)
-    new_p = OxmlElement('w:p')
-    tc.append(new_p)
-    if text:
-        run = OxmlElement('w:r')
-        t   = OxmlElement('w:t')
-        t.text = text
-        t.set(qn('xml:space'), 'preserve')
-        run.append(t)
-        new_p.append(run)
+    # Prepend the correct-answer star when needed
+    if is_correct:
+        star_run = OxmlElement('w:r')
+        star_t   = OxmlElement('w:t')
+        star_t.text = '* '
+        star_t.set(qn('xml:space'), 'preserve')
+        star_run.append(star_t)
+        pPr = new_p.find(qn('w:pPr'))
+        pos = (list(new_p).index(pPr) + 1) if pPr is not None else 0
+        new_p.insert(pos, star_run)
 
+    # Append the  \t\tأ  /  \t\tب  …  suffix
+    label_run = OxmlElement('w:r')
+    label_t   = OxmlElement('w:t')
+    label_t.text = f'\t\t{arabic_letter}'
+    label_t.set(qn('xml:space'), 'preserve')
+    label_run.append(label_t)
+    new_p.append(label_run)
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  PHASE 3 – TEMPLATE STRUCTURE DETECTION
-# ─────────────────────────────────────────────────────────────────────────────
+    _append_to_body(doc, new_p)
 
-class TemplateStructure:
-    """
-    Holds the cell positions (relative to the start of one question block)
-    for every field that needs to be filled.
-    """
-    def __init__(self):
-        self.id_cell:    tuple = None   # (rel_row, col_index)
-        self.body_cell:  tuple = None
-        # Arabic letter → {'content': (rel_row, col), 'star': (rel_row, col)}
-        self.options:    dict  = {}
-        self.block_rows: int   = 0      # rows that make up one question block
-
-    def is_valid(self) -> bool:
-        return (
-            self.id_cell   is not None and
-            self.body_cell is not None and
-            len(self.options) >= 2
-        )
-
-    def summary(self) -> str:
-        lines = [
-            f"  Block rows  : {self.block_rows}",
-            f"  ID cell     : row {self.id_cell[0]}, col {self.id_cell[1]}",
-            f"  Body cell   : row {self.body_cell[0]}, col {self.body_cell[1]}",
-        ]
-        for letter, info in self.options.items():
-            cr, cc = info['content']
-            sr, sc = info['star']
-            lines.append(
-                f"  Option '{letter}' : content(row {cr}, col {cc})  "
-                f"star(row {sr}, col {sc})"
-            )
-        return "\n".join(lines)
-
-
-def _cell_text_xml(tc_elem) -> str:
-    """Extract all text from a <w:tc> XML element."""
-    return ''.join(
-        (t.text or '') for t in tc_elem.findall('.//' + qn('w:t'))
-    ).strip()
-
-
-def detect_template_structure(table) -> TemplateStructure:
-    """
-    Auto-detect cell positions by scanning the first N rows for known
-    Arabic keyword labels and option letters.
-
-    Labels recognised:
-        ID cell    ← rows containing  'رمز السؤال'
-        Body cell  ← rows containing  'نص السؤال'
-        Options    ← rows containing  أ / ب / ت / ث
-    """
-    tbl_elem  = table._tbl
-    rows_xml  = tbl_elem.findall(qn('w:tr'))
-
-    ARABIC_OPTIONS = {'أ', 'ب', 'ت', 'ث'}
-    ID_KEYWORDS    = {'رمز السؤال'}
-    BODY_KEYWORDS  = {'نص السؤال'}
-
-    ts = TemplateStructure()
-    last_option_row = 0
-
-    for r_idx, row_xml in enumerate(rows_xml):
-        cells_xml = row_xml.findall(qn('w:tc'))
-
-        for c_idx, cell_xml in enumerate(cells_xml):
-            text = _cell_text_xml(cell_xml)
-
-            # ── Question-ID label ────────────────────────────────────────────
-            if any(kw in text for kw in ID_KEYWORDS) and ts.id_cell is None:
-                # The value goes in the next column that doesn't repeat the label
-                for nc in range(c_idx + 1, len(cells_xml)):
-                    nc_text = _cell_text_xml(cells_xml[nc])
-                    if not any(kw in nc_text for kw in ID_KEYWORDS):
-                        ts.id_cell = (r_idx, nc)
-                        break
-                # Fallback: same cell (unusual, but handled gracefully)
-                if ts.id_cell is None:
-                    ts.id_cell = (r_idx, c_idx)
-
-            # ── Question-body label ──────────────────────────────────────────
-            elif any(kw in text for kw in BODY_KEYWORDS) and ts.body_cell is None:
-                if c_idx + 1 < len(cells_xml):
-                    ts.body_cell = (r_idx, c_idx + 1)
-                else:
-                    # Label spans full width → body content goes into this cell
-                    ts.body_cell = (r_idx, c_idx)
-
-            # ── Arabic option letter ─────────────────────────────────────────
-            elif text in ARABIC_OPTIONS and text not in ts.options:
-                content_col = c_idx + 1 if c_idx + 1 < len(cells_xml) else c_idx
-                # Star column = last physical column in the row
-                star_col = len(cells_xml) - 1
-                # Avoid content_col == star_col for very narrow tables
-                if content_col == star_col and content_col > c_idx:
-                    star_col = content_col
-                ts.options[text] = {
-                    'content': (r_idx, content_col),
-                    'star':    (r_idx, star_col),
-                }
-                last_option_row = r_idx
-
-    ts.block_rows = last_option_row + 1
-    return ts
+    # Handle rare multi-paragraph options (e.g. a diagram below the text)
+    for extra in option_paras[1:]:
+        if _para_has_content(extra):
+            _copy_source_para(doc, extra, source_doc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  PHASE 4 – CELL ACCESS  (XML-level, merged-cell-safe)
+#  PHASE 3 – BUILD ONE QUESTION BLOCK
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _get_cell(table, abs_row: int, col: int):
+def build_question_block(doc, q_num, k_data, q_data, source_doc):
     """
-    Return a docx _Cell at the given absolute row and physical column index,
-    bypassing python-docx's merged-cell remapping.
+    Append one complete question block to doc, exactly matching the
+    Arabic question-bank template structure:
 
-    Returns None if the index is out of range.
+        سري للغاية | Top Secret
+        سؤال رقم: N
+        رمز السؤال : <External ID>
+        نص السؤال :
+        <body paragraphs>
+        الجواب الصحيح (*)
+        نص الاجابة\\t\\tرقم الاجابة
+        [*]<option A>\\t\\tأ
+        [*]<option B>\\t\\tب
+        [*]<option C>\\t\\tت
+        [*]<option D>\\t\\tث
+        ── page break ──
     """
-    from docx.table import _Cell
-    rows = table._tbl.findall(qn('w:tr'))
-    if abs_row >= len(rows):
-        return None
-    row_cells = rows[abs_row].findall(qn('w:tc'))
-    if col >= len(row_cells):
-        return None
-    return _Cell(row_cells[col], table)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  PHASE 5 – FILL ONE QUESTION BLOCK
-# ─────────────────────────────────────────────────────────────────────────────
-
-def fill_question_block(
-    table,
-    row_offset: int,
-    ts: TemplateStructure,
-    q_num: int,
-    k_data: dict,
-    q_data: dict,
-    source_doc,
-    target_doc,
-):
-    """
-    Inject question data into the block that begins at row_offset.
-
-    Parameters
-    ----------
-    table       : the target Document's table
-    row_offset  : first row of this question's block (0-based)
-    ts          : detected template structure
-    q_num       : question sequence number
-    k_data      : {'id': str, 'answer': Arabic letter}
-    q_data      : {'body': [...], 'A': [...], 'B': [...], 'C': [...], 'D': [...]}
-    source_doc  : source Document (needed for image-rel transfer)
-    target_doc  : target Document (needed for image-rel transfer)
-    """
-    def cell(rel_row, col):
-        return _get_cell(table, row_offset + rel_row, col)
-
-    # 1. Question ID
-    if ts.id_cell:
-        c = cell(*ts.id_cell)
-        if c:
-            _set_cell_text(c, k_data.get('id', ''))
-
-    # 2. Question body
-    if ts.body_cell:
-        c = cell(*ts.body_cell)
-        if c:
-            inject_paragraphs_into_cell(
-                q_data.get('body', []), c, source_doc, target_doc
-            )
-
-    # 3. Options + correct-answer star
     correct_arabic = k_data.get('answer', '')
+    q_id           = k_data.get('id', '')
 
-    for ara_letter, info in ts.options.items():
-        eng_letter    = OPTION_MAP_REV.get(ara_letter, '')
-        option_paras  = q_data.get(eng_letter, [])
+    # ── Static header lines ───────────────────────────────────────────────────
+    doc.add_paragraph("سري للغاية | Top Secret")
+    doc.add_paragraph(f"سؤال رقم: {q_num}")
+    doc.add_paragraph(f"رمز السؤال : {q_id}")
+    doc.add_paragraph("نص السؤال :")
 
-        # Option content
-        c_content = cell(*info['content'])
-        if c_content:
-            if option_paras:
-                inject_paragraphs_into_cell(
-                    option_paras, c_content, source_doc, target_doc
-                )
-            else:
-                _set_cell_text(c_content, '')   # clear template placeholder
+    # ── Question body  (text / math / images preserved via XML copy) ─────────
+    body_paras = [p for p in q_data.get('body', []) if _para_has_content(p)]
+    if body_paras:
+        for p in body_paras:
+            _copy_source_para(doc, p, source_doc)
+    else:
+        doc.add_paragraph("")   # blank placeholder if body is empty
 
-        # Star marker (correct answer)
-        c_star = cell(*info['star'])
-        if c_star:
-            _set_cell_text(c_star, '*' if ara_letter == correct_arabic else '')
+    # ── Answer section ────────────────────────────────────────────────────────
+    doc.add_paragraph("الجواب الصحيح (*)")
+    doc.add_paragraph("نص الاجابة\t\tرقم الاجابة")
+
+    for eng_letter, arabic_letter in OPTION_MAP.items():
+        option_paras = q_data.get(eng_letter, [])
+        is_correct   = (arabic_letter == correct_arabic)
+        _build_option_para(doc, option_paras, arabic_letter, is_correct, source_doc)
+
+    # ── Page break between questions ──────────────────────────────────────────
+    doc.add_page_break()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  PHASE 6 – TEMPLATE BLOCK CLONING
+#  PHASE 4 – MASTER ORCHESTRATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _clone_block(table, num_rows: int) -> list:
+def _clear_body(doc):
     """
-    Deep-copy the first `num_rows` rows of `table`.
-    Returns a list of detached <w:tr> XML elements.
+    Remove all paragraphs and tables from the document body so we can
+    rebuild the content from scratch, while keeping the  <w:sectPr>  so
+    the page layout (size, margins, RTL section direction) is preserved.
     """
-    all_rows = table._tbl.findall(qn('w:tr'))
-    return [
-        deepcopy(all_rows[i])
-        for i in range(min(num_rows, len(all_rows)))
-    ]
+    body = doc.element.body
+    for elem in list(body):
+        tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+        if tag != 'sectPr':
+            body.remove(elem)
+    # Ensure at least one sectPr exists so Word doesn't complain
+    if not body.findall(qn('w:sectPr')):
+        body.append(OxmlElement('w:sectPr'))
 
-
-def _append_block(table, row_elements: list):
-    """Append detached <w:tr> elements to the end of `table`."""
-    tbl = table._tbl
-    for tr in row_elements:
-        tbl.append(tr)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  PHASE 7 – MASTER ORCHESTRATION
-# ─────────────────────────────────────────────────────────────────────────────
 
 def process_and_transfer(
     source_path:   str,
@@ -467,113 +377,77 @@ def process_and_transfer(
     """
     Full pipeline:
         load source → extract key → parse questions →
-        detect template → fill blocks → save output
+        init output from template → build blocks → save
 
     Parameters
     ----------
-    source_path   : .docx  PEA source file
-    template_path : .docx  Arabic question-bank template
-    output_path   : .docx  destination for the filled bank
-    log           : callable(str) for status messages, or None
+    source_path   : PEA source .docx
+    template_path : Arabic question-bank template .docx
+    output_path   : destination .docx
+    log           : optional callable(str) for progress messages
     """
     def _log(msg: str):
         if log:
             log(msg)
 
-    # ── Load ──────────────────────────────────────────────────────────────────
     _log("Loading source document …")
-    source_doc  = Document(source_path)
+    source_doc = Document(source_path)
 
-    _log("Loading template document …")
-    target_doc  = Document(template_path)
-
-    # ── Extract exam key ──────────────────────────────────────────────────────
-    _log("Extracting exam key (question IDs & correct answers) …")
+    _log("Extracting exam key …")
     exam_key = extract_exam_key(source_doc)
     if not exam_key:
         raise ValueError(
             "No data found in the EXAMKEY table.\n"
-            "Check that the first table in the source document contains "
-            "sequential numbers in column 0, question IDs in column 1, "
-            "and the correct answer (A/B/C/D) in column 4."
+            "Ensure the first table in the source document follows:\n"
+            "  Seq | Question ID | External ID | Blueprint | Answer | Status"
         )
     _log(f"  → {len(exam_key)} entries in exam key.")
 
-    # ── Parse questions ───────────────────────────────────────────────────────
-    _log("Parsing questions from source document …")
+    _log("Parsing questions …")
     parsed_qs = parse_questions(source_doc)
     if not parsed_qs:
         raise ValueError(
-            "No questions were found in the source document.\n"
-            "Questions must begin with 'QUESTION 1', 'QUESTION 2', etc."
+            "No questions found in the source document.\n"
+            "Questions must start with 'QUESTION 1', 'QUESTION 2', etc."
         )
     _log(f"  → {len(parsed_qs)} questions parsed.")
 
-    # ── Detect template structure ─────────────────────────────────────────────
-    if not target_doc.tables:
-        raise ValueError("Template document contains no tables.")
+    _log("Initialising output document …")
+    output_doc = Document(template_path)
+    _clear_body(output_doc)
 
-    target_table = target_doc.tables[0]
-    _log("Detecting template structure …")
-    ts = detect_template_structure(target_table)
-
-    if not ts.is_valid():
-        raise ValueError(
-            "Could not auto-detect the template layout.\n\n"
-            "Make sure the template's first table contains at least:\n"
-            "  • a cell with 'رمز السؤال'  (question ID label)\n"
-            "  • a cell with 'نص السؤال'   (body label)\n"
-            "  • cells with  أ  ب  ت  ث    (option labels)\n"
-        )
-    _log("  Template structure detected:")
-    for line in ts.summary().splitlines():
-        _log(line)
-
-    # ── Determine which questions to transfer ─────────────────────────────────
     all_nums = sorted(set(exam_key) & set(parsed_qs))
     if not all_nums:
         raise ValueError(
-            "The question numbers in the exam key do not match the "
-            "question numbers parsed from the body of the document.\n"
-            f"Exam key has: {sorted(exam_key.keys())}\n"
-            f"Parsed body has: {sorted(parsed_qs.keys())}"
+            "Question numbers in the exam key don't match the parsed questions.\n"
+            f"Exam key : {sorted(exam_key.keys())}\n"
+            f"Parsed   : {sorted(parsed_qs.keys())}"
         )
+
     total = len(all_nums)
-    _log(f"Transferring {total} question(s) …")
+    _log(f"Writing {total} question block(s) …")
 
-    # ── Fill blocks ───────────────────────────────────────────────────────────
-    for idx, q_num in enumerate(all_nums):
-
-        # For every question after the first, clone the template block
-        if idx > 0:
-            cloned = _clone_block(target_table, ts.block_rows)
-            _append_block(target_table, cloned)
-
-        row_offset = idx * ts.block_rows
-        fill_question_block(
-            target_table,
-            row_offset,
-            ts,
+    for idx, q_num in enumerate(all_nums, start=1):
+        build_question_block(
+            output_doc,
             q_num,
             exam_key[q_num],
             parsed_qs[q_num],
             source_doc,
-            target_doc,
         )
         _log(
-            f"  [{idx + 1}/{total}]  Q{q_num} → "
+            f"  [{idx}/{total}]  Q{q_num}  →  "
             f"{exam_key[q_num]['id']}  "
             f"(correct: {exam_key[q_num]['answer']})"
         )
 
-    # ── Save ──────────────────────────────────────────────────────────────────
-    _log(f"Saving output → {output_path}")
-    target_doc.save(output_path)
+    _log(f"Saving → {output_path}")
+    output_doc.save(output_path)
     _log("Done!  ✓")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  PHASE 8 – GUI
+#  PHASE 5 – GUI
 # ─────────────────────────────────────────────────────────────────────────────
 
 try:
@@ -587,12 +461,12 @@ except ImportError:
 class TransferApp:
     """Main application window."""
 
-    _BG      = "#ecf0f1"
-    _HEADER  = "#2c3e50"
-    _GREEN   = "#27ae60"
-    _GREY    = "#7f8c8d"
-    _LOG_BG  = "#1a1a2e"
-    _LOG_FG  = "#00ff88"
+    _BG     = "#ecf0f1"
+    _HEADER = "#2c3e50"
+    _GREEN  = "#27ae60"
+    _GREY   = "#7f8c8d"
+    _LOG_BG = "#1a1a2e"
+    _LOG_FG = "#00ff88"
 
     def __init__(self, root):
         self.root = root
@@ -643,15 +517,12 @@ class TransferApp:
         )
         pbox.pack(fill=tk.X, padx=18)
 
-        self.progress_bar = ttk.Progressbar(
-            pbox, mode='indeterminate', length=580,
-        )
+        self.progress_bar = ttk.Progressbar(pbox, mode='indeterminate', length=580)
         self.progress_bar.pack(fill=tk.X)
 
         self.log_box = tk.Text(
             pbox, height=7, state='disabled',
-            font=("Consolas", 9),
-            bg=self._LOG_BG, fg=self._LOG_FG,
+            font=("Consolas", 9), bg=self._LOG_BG, fg=self._LOG_FG,
             relief=tk.FLAT, bd=0,
         )
         self.log_box.pack(fill=tk.X, pady=(6, 0))
@@ -671,8 +542,7 @@ class TransferApp:
     def _file_row(self, parent, label, var, cmd, row):
         tk.Label(
             parent, text=label,
-            font=("Segoe UI", 9), bg=self._BG,
-            anchor='w', width=30,
+            font=("Segoe UI", 9), bg=self._BG, anchor='w', width=30,
         ).grid(row=row, column=0, sticky='w', pady=6)
         tk.Entry(
             parent, textvariable=var, width=40,
@@ -731,28 +601,20 @@ class TransferApp:
             )
             return
 
-        # Clear previous log
         self.log_box.config(state='normal')
         self.log_box.delete('1.0', tk.END)
         self.log_box.config(state='disabled')
 
-        self.run_btn.config(
-            text="⏳  Processing …",
-            state=tk.DISABLED,
-            bg=self._GREY,
-        )
+        self.run_btn.config(text="⏳  Processing …", state=tk.DISABLED, bg=self._GREY)
         self.progress_bar.start(10)
 
         threading.Thread(
-            target=self._backend,
-            args=(src, tmpl, out),
-            daemon=True,
+            target=self._backend, args=(src, tmpl, out), daemon=True,
         ).start()
 
     def _backend(self, src, tmpl, out):
         def log(msg):
             self.root.after(0, self._append_log, msg)
-
         try:
             process_and_transfer(src, tmpl, out, log=log)
             self.root.after(
@@ -766,21 +628,14 @@ class TransferApp:
             err = str(exc)
             self.root.after(
                 0,
-                lambda: messagebox.showerror(
-                    "Error",
-                    f"Transfer failed:\n\n{err}",
-                ),
+                lambda: messagebox.showerror("Error", f"Transfer failed:\n\n{err}"),
             )
         finally:
             self.root.after(0, self._done)
 
     def _done(self):
         self.progress_bar.stop()
-        self.run_btn.config(
-            text="▶   RUN TRANSFER",
-            state=tk.NORMAL,
-            bg=self._GREEN,
-        )
+        self.run_btn.config(text="▶   RUN TRANSFER", state=tk.NORMAL, bg=self._GREEN)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -790,7 +645,7 @@ class TransferApp:
 if __name__ == "__main__":
     if not _TKINTER_AVAILABLE:
         print("tkinter is not available in this environment.")
-        print("Use process_and_transfer() directly from Python instead.")
+        print("Import and call  process_and_transfer()  directly from Python.")
     else:
         root = tk.Tk()
         app  = TransferApp(root)
