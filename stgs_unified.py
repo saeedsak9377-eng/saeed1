@@ -577,6 +577,9 @@ class AssemblyParams:
     # Used Blocks fallback
     used_blocks:        Optional["pd.DataFrame"] = field(default=None)
     allow_used_blocks:  bool = False
+    # Max times a Used Blocks question may appear across all assembled forms.
+    # 0 = no cap (same as old behaviour).  Defaults to 2 (one primary + one reuse).
+    max_ub_usage:       int  = 2
     # Adaptive Mean Control
     adaptive_mean_control: bool = False
     # ── Feature 2: Difficulty distribution scope ──────────────────────────────
@@ -1545,6 +1548,9 @@ class AssemblyEngine:
         # Block prefix for Used Blocks stage-level filtering (e.g. "GAT-2.1")
         # Derived from the block ID being assembled: "GAT-2.1.006" → "GAT-2.1"
         self.block_prefix: Optional[str] = block_prefix
+        # Tracks how many forms each Used Blocks question has appeared in.
+        # Shared across engine instances via the dict passed from assemble_forms.
+        self.ub_usage: dict[str, int] = {}   # set by assemble_forms
 
     # ── public ────────────────────────────────────────────────────────────────
     def assemble_one_form(self, form_number: int
@@ -1803,31 +1809,75 @@ class AssemblyEngine:
                             f"— {need_more} placeholders added.")
                         continue
 
-                    # Sort by Number of used ascending (least-used first)
-                    if "Number of used" in ub_cat.columns:
-                        ub_cat = ub_cat.sort_values("Number of used",
-                                                     ascending=True)
-                    else:
-                        ub_cat = ub_cat.copy()
+                    # ── Max-Usage cap + Priority selection ────────────────────
+                    # Apply the session-level UB usage counter so that:
+                    #   Priority 1 — questions never selected before (unique)
+                    #   Priority 2 — questions selected < max_ub_usage times
+                    # Hard limit: questions at max_ub_usage or above are excluded.
+                    max_ub = p.max_ub_usage if p.max_ub_usage > 0 else 999
 
-                    # Rename columns to match main bank schema if needed
+                    if "QuestionID" in ub_cat.columns:
+                        ub_cat = ub_cat.copy()
+                        ub_cat["_session_uses"] = (
+                            ub_cat["QuestionID"].astype(str)
+                            .map(lambda q: self.ub_usage.get(q, 0))
+                        )
+                        # Hard cap: never exceed max_ub_usage
+                        ub_cat = ub_cat[ub_cat["_session_uses"] < max_ub]
+
+                    if ub_cat.empty:
+                        all_warnings.append(
+                            f"Form {form_number}: All Used Blocks candidates for "
+                            f"'{slot.label}' have reached the max usage limit "
+                            f"({max_ub}) — {need_more} item(s) skipped.")
+                        continue
+
+                    # Sort order:
+                    #   1. _session_uses ascending (prefer never-used first)
+                    #   2. 'Number of used' ascending (least-used in UB first)
+                    # Within the same tier, shuffle for fairness.
+                    sort_cols  = ["_session_uses"]
+                    sort_asc   = [True]
+                    if "Number of used" in ub_cat.columns:
+                        sort_cols.append("Number of used")
+                        sort_asc.append(True)
+                    ub_cat = ub_cat.sort_values(sort_cols, ascending=sort_asc)
+
+                    # Within each tier (same _session_uses value), shuffle
+                    # so the same questions aren't always picked first.
+                    shuffled_parts = []
+                    for tier_val in sorted(ub_cat["_session_uses"].unique()):
+                        tier = ub_cat[ub_cat["_session_uses"] == tier_val].copy()
+                        tier = tier.sample(frac=1,
+                                           random_state=int(self.rng.integers(2**31)))
+                        shuffled_parts.append(tier)
+                    if shuffled_parts:
+                        ub_cat = pd.concat(shuffled_parts, ignore_index=True)
+
+                    # Rename difficulty column to match main bank schema if needed
                     if self.dcol not in ub_cat.columns and dcol_ub in ub_cat.columns:
                         ub_cat = ub_cat.rename(columns={dcol_ub: self.dcol})
 
                     top = ub_cat.head(need_more).copy()
-                    top["_form"] = form_number
+                    top["_form"]   = form_number
                     top["_source"] = "Used Blocks"
 
                     ub_picked = list(top["QuestionID"].dropna().astype(str))
                     intra_form_used_ids.update(ub_picked)
+                    # Update the session counter immediately so later slots
+                    # and later forms see the correct usage counts.
+                    for qid in ub_picked:
+                        self.ub_usage[qid] = self.ub_usage.get(qid, 0) + 1
                     form_parts.append(top)
 
+                    tier_info = "unique" if top.get("_session_uses", pd.Series([0])).max() == 0 \
+                                else f"reused (max_uses={max_ub})"
                     all_warnings.append(
                         f"Form {form_number}: {len(top)} question(s) for "
                         f"'{slot.label}' taken from Used Blocks "
-                        f"(least-used first).")
-                    log.info("Used Blocks fallback: %d items for '%s' in form %d",
-                             len(top), slot.label, form_number)
+                        f"({tier_info}, least-used first).")
+                    log.info("Used Blocks fallback: %d items for '%s' in form %d [%s]",
+                             len(top), slot.label, form_number, tier_info)
 
                 # Rebuild form with the fallback rows added
                 form = pd.concat(form_parts, ignore_index=True) if form_parts \
@@ -2152,6 +2202,10 @@ def assemble_forms(bank: pd.DataFrame,
       Feature 4 (fallback) → _fallback_for_difficulty() runs after retries
     """
     usage: dict[str, int] = {}
+    # ub_usage tracks how many times each Used-Blocks question has been
+    # selected across ALL forms in this assembly session.
+    # Key: QuestionID (str), Value: count of forms it has appeared in.
+    ub_usage: dict[str, int] = {}
     results: list[tuple[pd.DataFrame, float, list[str]]] = []
     domain_col = "D" if "D" in bank.columns else "المجال"
 
@@ -2179,6 +2233,7 @@ def assemble_forms(bank: pd.DataFrame,
 
         engine = AssemblyEngine(bank, params, dcol, dict(usage),
                                 block_prefix=block_prefix)
+        engine.ub_usage = ub_usage   # share the session-level UB counter
         best_form, best_mean, best_warns = engine.assemble_one_form(fidx + 1)
 
         # ── Adaptive Mean Control (runs BEFORE the retry loop) ─────────────
@@ -2216,6 +2271,7 @@ def assemble_forms(bank: pd.DataFrame,
                 })
                 eng2 = AssemblyEngine(bank, p2, dcol, dict(usage),
                                       block_prefix=block_prefix)
+                eng2.ub_usage = ub_usage   # share session UB counter
                 form2, mean2, w2 = eng2.assemble_one_form(fidx + 1)
 
                 # Run adaptive correction on each retry attempt too
@@ -2276,6 +2332,18 @@ def assemble_forms(bank: pd.DataFrame,
         if "QuestionID" in best_form.columns:
             for qid in best_form["QuestionID"].dropna().astype(str):
                 usage[qid] = usage.get(qid, 0) + 1
+
+        # Update the session-level Used Blocks usage counter so subsequent
+        # forms know which UB questions have already been selected and how
+        # many times they have been used.
+        if (params.allow_used_blocks and
+                params.used_blocks is not None and
+                "QuestionID" in best_form.columns and
+                "QuestionID" in params.used_blocks.columns):
+            ub_qids = set(params.used_blocks["QuestionID"].astype(str))
+            for qid in best_form["QuestionID"].dropna().astype(str):
+                if qid in ub_qids:
+                    ub_usage[qid] = ub_usage.get(qid, 0) + 1
 
         log.info("%s: %d items, mean_diff=%.3f%s",
                  name, len(best_form), best_mean,
@@ -2439,46 +2507,105 @@ def _write_domain_chart(wb, ws, domain_df: pd.DataFrame, dcol: str,
     return row_offset + 30
 
 
-def _embed_3pl_charts(wb, ws, fa: FormAnalysis, img_row: int):
+def _embed_3pl_charts(wb, ws, fa: FormAnalysis, img_row: int,
+                       sheet_name: str = ""):
     """
-    Embed 3PL charts into the worksheet.
+    Embed 3PL charts as LIVE xlsxwriter native charts.
 
-    Layout (all charts placed far right, starting at column U = index 20,
-    so they never overlap the item table or difficulty distribution charts
-    which occupy columns A-R):
-      Row img_row      col 20 : Score Distribution
-      Row img_row      col 27 : Average ICC
-      Row img_row + 20 col 20 : SEM
+    Charts reference actual worksheet cell ranges → any manual edit to
+    the data cells is immediately reflected in the chart (dynamic binding).
+    No static PNG images are used.
+
+    Data tables written at column U (index 20), then charts reference them:
+      Row img_row         col 20 : Score Distribution data + chart
+      Row img_row + n+3   col 20 : ICC data + chart
+      Row img_row + 2n+6  col 20 : SEM data + chart
     """
-    RIGHT_COL = 20   # column U — well clear of item table and domain charts
+    RIGHT_COL = 20
+    FMTS = _wb_fmts(wb)
 
-    # Score distribution
-    fig, ax = plt.subplots(figsize=(5, 3))
-    ax.hist(fa.scores, bins=15, color=ETEC_BLUE, edgecolor="white", alpha=0.88)
-    ax.set(xlabel="Total Score", ylabel="Number of Students",
-           title="Simulated Score Distribution")
-    ax.grid(alpha=0.3, axis="y"); fig.tight_layout()
-    ws.insert_image(img_row, RIGHT_COL, "", {"image_data": _fig_bytes(fig)})
-    plt.close(fig)
+    # ── Score Distribution ─────────────────────────────────────────────────
+    score_counts, score_edges = np.histogram(fa.scores, bins=15)
+    score_labels = [f"{score_edges[i]:.0f}–{score_edges[i+1]:.0f}"
+                    for i in range(len(score_counts))]
+    n_sc = len(score_counts)
 
-    # Average ICC — placed 7 columns to the right of Score chart
-    avg_icc = fa.icc.mean(axis=1)
-    fig, ax = plt.subplots(figsize=(5, 3))
-    ax.plot(fa.theta_grid, avg_icc, color=ETEC_TEAL, lw=2)
-    ax.set(xlabel="Ability (θ)", ylabel="P(Correct)",
-           title="Item Characteristic Curve (ICC)", xlim=(-3, 3), ylim=(0, 1.05))
-    ax.grid(alpha=0.3); fig.tight_layout()
-    ws.insert_image(img_row, RIGHT_COL + 7, "", {"image_data": _fig_bytes(fig)})
-    plt.close(fig)
+    ws.write(img_row, RIGHT_COL,   "Score Bin",  FMTS["shdr"])
+    ws.write(img_row, RIGHT_COL+1, "Frequency",  FMTS["shdr"])
+    for i, (lbl, cnt) in enumerate(zip(score_labels, score_counts)):
+        ws.write(img_row+1+i, RIGHT_COL,   lbl)
+        ws.write(img_row+1+i, RIGHT_COL+1, int(cnt))
 
-    # SEM — below score chart
-    fig, ax = plt.subplots(figsize=(5, 3))
-    ax.plot(fa.theta_grid, fa.sem, color=ETEC_GREEN, lw=2)
-    ax.set(xlabel="Ability (θ)", ylabel="SEM",
-           title="Standard Error of Measurement (SEM)", xlim=(-3, 3))
-    ax.grid(alpha=0.3); fig.tight_layout()
-    ws.insert_image(img_row + 20, RIGHT_COL, "", {"image_data": _fig_bytes(fig)})
-    plt.close(fig)
+    ch_sc = wb.add_chart({"type": "column"})
+    ch_sc.add_series({
+        "name":       "Score Distribution",
+        "categories": [sheet_name, img_row+1, RIGHT_COL,
+                        img_row+n_sc, RIGHT_COL],
+        "values":     [sheet_name, img_row+1, RIGHT_COL+1,
+                        img_row+n_sc, RIGHT_COL+1],
+        "fill":       {"color": ETEC_BLUE},
+    })
+    ch_sc.set_title({"name": "Simulated Score Distribution"})
+    ch_sc.set_x_axis({"name": "Total Score"})
+    ch_sc.set_y_axis({"name": "Students"})
+    ch_sc.set_legend({"none": True})
+    ch_sc.set_size({"width": 420, "height": 240})
+    ws.insert_chart(img_row, RIGHT_COL+3, ch_sc)
+
+    # ── Average ICC ────────────────────────────────────────────────────────
+    step    = max(1, len(fa.theta_grid) // 20)
+    th_ds   = fa.theta_grid[::step]
+    icc_ds  = fa.icc.mean(axis=1)[::step]
+    n_ic    = len(th_ds)
+    icc_row = img_row + n_sc + 3
+
+    ws.write(icc_row, RIGHT_COL,   "Theta",    FMTS["shdr"])
+    ws.write(icc_row, RIGHT_COL+1, "Avg P(θ)", FMTS["shdr"])
+    for i, (th, pp) in enumerate(zip(th_ds, icc_ds)):
+        ws.write(icc_row+1+i, RIGHT_COL,   round(float(th), 2))
+        ws.write(icc_row+1+i, RIGHT_COL+1, round(float(pp), 4))
+
+    ch_ic = wb.add_chart({"type": "line"})
+    ch_ic.add_series({
+        "name":       "Avg ICC",
+        "categories": [sheet_name, icc_row+1, RIGHT_COL,
+                        icc_row+n_ic, RIGHT_COL],
+        "values":     [sheet_name, icc_row+1, RIGHT_COL+1,
+                        icc_row+n_ic, RIGHT_COL+1],
+        "line":       {"color": ETEC_TEAL, "width": 2.25},
+    })
+    ch_ic.set_title({"name": "Item Characteristic Curve (ICC)"})
+    ch_ic.set_x_axis({"name": "Ability (θ)"})
+    ch_ic.set_y_axis({"name": "P(Correct)", "min": 0, "max": 1})
+    ch_ic.set_legend({"none": True})
+    ch_ic.set_size({"width": 420, "height": 240})
+    ws.insert_chart(icc_row, RIGHT_COL+3, ch_ic)
+
+    # ── SEM ────────────────────────────────────────────────────────────────
+    sem_ds  = np.clip(fa.sem[::step], 0, 5.0)
+    sem_row = icc_row + n_ic + 3
+
+    ws.write(sem_row, RIGHT_COL,   "Theta", FMTS["shdr"])
+    ws.write(sem_row, RIGHT_COL+1, "SEM",   FMTS["shdr"])
+    for i, (th, sv) in enumerate(zip(th_ds, sem_ds)):
+        ws.write(sem_row+1+i, RIGHT_COL,   round(float(th), 2))
+        ws.write(sem_row+1+i, RIGHT_COL+1, round(float(sv), 4))
+
+    ch_sem = wb.add_chart({"type": "line"})
+    ch_sem.add_series({
+        "name":       "SEM",
+        "categories": [sheet_name, sem_row+1, RIGHT_COL,
+                        sem_row+n_ic, RIGHT_COL],
+        "values":     [sheet_name, sem_row+1, RIGHT_COL+1,
+                        sem_row+n_ic, RIGHT_COL+1],
+        "line":       {"color": ETEC_GREEN, "width": 2.25},
+    })
+    ch_sem.set_title({"name": "Standard Error of Measurement (SEM)"})
+    ch_sem.set_x_axis({"name": "Ability (θ)"})
+    ch_sem.set_y_axis({"name": "SEM", "min": 0})
+    ch_sem.set_legend({"none": True})
+    ch_sem.set_size({"width": 420, "height": 240})
+    ws.insert_chart(sem_row, RIGHT_COL+3, ch_sem)
 
 
 M1_EXPORT_COLS = [
@@ -2641,7 +2768,7 @@ def write_forms_workbook(
         # ── 3PL charts (score hist, ICC, SEM) ───────────────────────────────
         if fa:
             img_row = tbl + len(df) + 4
-            _embed_3pl_charts(wb, ws, fa, img_row)
+            _embed_3pl_charts(wb, ws, fa, img_row, sheet_name=name[:31])
 
     wb.close()
     log.info("Forms workbook → %s", out_path)
@@ -3272,10 +3399,25 @@ class Mode1Window(_BaseMode):
         ub_ctrl = tk.Frame(ub_frm, bg=BG_L); ub_ctrl.pack(fill="x", pady=(6,0))
         tk.Checkbutton(ub_ctrl,
                        text="Allow reuse from Used Blocks if main bank is exhausted  "
-                            "(last resort — sorted by least used first)",
+                            "(last resort — unique-first, then controlled reuse)",
                        variable=self._use_ub_var,
                        bg=BG_L, fg=TXD, font=FB,
                        activebackground=BG_L).pack(side="left")
+
+        # Max Usage Per Question (UB) spinbox
+        ub_max_row = tk.Frame(ub_frm, bg=BG_L); ub_max_row.pack(fill="x", pady=(4,0))
+        tk.Label(ub_max_row,
+                 text="Max Usage Per Question  (Used Blocks):",
+                 bg=BG_L, fg=TXD, font=FB).pack(side="left")
+        self._max_ub_usage_m1 = tk.Spinbox(
+            ub_max_row, from_=1, to=20, width=4, font=FB,
+            bg="#FFF", fg="#000", relief="solid", bd=1)
+        self._max_ub_usage_m1.delete(0, "end"); self._max_ub_usage_m1.insert(0, "2")
+        self._max_ub_usage_m1.pack(side="left", padx=6)
+        tk.Label(ub_max_row,
+                 text="(1 = unique only, 2+ = allow controlled reuse up to N times)",
+                 bg=BG_L, fg="#666", font=("Segoe UI", 8, "italic")).pack(side="left")
+
         self._ub_stats_lbl = tk.Label(ub_frm, text="",
                                       bg=BG_L, fg=ETEC_PURPLE,
                                       font=("Segoe UI", 9, "italic"))
@@ -4025,6 +4167,8 @@ class Mode1Window(_BaseMode):
             rng_seed=int(seed_s) if seed_s else None,
             used_blocks=self.used_blocks_df if self._use_ub_var.get() else None,
             allow_used_blocks=self._use_ub_var.get(),
+            max_ub_usage=max(1, int(self._max_ub_usage_m1.get()))
+                         if self._max_ub_usage_m1.get().strip().isdigit() else 2,
             adaptive_mean_control=self._adaptive_mean_var.get(),
             difficulty_scope=self._diff_scope_var.get(),
             difficulty_method=self._diff_method_var.get(),
@@ -4266,9 +4410,24 @@ class Mode2Window(_BaseMode):
              bg=ETEC_PURPLE).pack(side="left", padx=8)
         ub_ctrl = tk.Frame(ub_frm, bg=BG_L); ub_ctrl.pack(fill="x", pady=(6,0))
         tk.Checkbutton(ub_ctrl,
-                       text="Allow reuse from Used Blocks if main bank is exhausted",
+                       text="Allow reuse from Used Blocks if main bank is exhausted  "
+                            "(unique-first, then controlled reuse)",
                        variable=self._use_ub_var,
                        bg=BG_L, fg=TXD, font=FB, activebackground=BG_L).pack(side="left")
+
+        ub_max_row2 = tk.Frame(ub_frm, bg=BG_L); ub_max_row2.pack(fill="x", pady=(4,0))
+        tk.Label(ub_max_row2,
+                 text="Max Usage Per Question  (Used Blocks):",
+                 bg=BG_L, fg=TXD, font=FB).pack(side="left")
+        self._max_ub_usage_m2 = tk.Spinbox(
+            ub_max_row2, from_=1, to=20, width=4, font=FB,
+            bg="#FFF", fg="#000", relief="solid", bd=1)
+        self._max_ub_usage_m2.delete(0, "end"); self._max_ub_usage_m2.insert(0, "2")
+        self._max_ub_usage_m2.pack(side="left", padx=6)
+        tk.Label(ub_max_row2,
+                 text="(1 = unique only, 2+ = allow controlled reuse up to N times)",
+                 bg=BG_L, fg="#666", font=("Segoe UI", 8, "italic")).pack(side="left")
+
         self._ub_stats_lbl = tk.Label(ub_frm, text="",
                                       bg=BG_L, fg=ETEC_PURPLE,
                                       font=("Segoe UI", 9, "italic"))
@@ -4747,6 +4906,8 @@ class Mode2Window(_BaseMode):
             rng_seed=int(seed_s) if seed_s else None,
             used_blocks=self.used_blocks_df if self._use_ub_var.get() else None,
             allow_used_blocks=self._use_ub_var.get(),
+            max_ub_usage=max(1, int(self._max_ub_usage_m2.get()))
+                         if self._max_ub_usage_m2.get().strip().isdigit() else 2,
             adaptive_mean_control=self._adaptive_mean_var.get(),
         )
         self._n_forms_last = n_forms
