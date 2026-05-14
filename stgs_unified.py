@@ -2236,10 +2236,19 @@ def assemble_forms(bank: pd.DataFrame,
         block_prefix = _m.group(1) if _m else None
 
         # ── Test Equating — pre-lock anchor items ─────────────────────────
-        # For method="anchor_items": select anchor rows from the reference
-        # form(s), add them directly to the bank as pre-selected rows, and
-        # reduce the slot counts accordingly so the engine fills only the
-        # remaining (non-anchor) slots.
+        #
+        # For method="anchor_items":
+        #   1. The PREVIOUS assembled form (results[fidx-1]) is always used
+        #      as the reference — no external reference_forms list needed.
+        #      Form 1 has no reference and gets zero anchors (correct).
+        #   2. Anchors are taken from approved items (Stats == معتمد).
+        #   3. Anchors bypass the normal reuse restriction — they are
+        #      INTENTIONALLY repeated across forms (that is the whole point
+        #      of anchor/common-item equating).
+        #   4. Remaining slots are reduced by the number of locked anchors
+        #      so the engine only needs to fill the non-anchor positions.
+        #   5. Anchors are merged back into the final form after assembly.
+        #   6. Actual overlap is validated and logged.
         anchor_df    = pd.DataFrame()
         eq_params    = params.equating
         pre_selected: set[str] = set()
@@ -2247,42 +2256,63 @@ def assemble_forms(bank: pd.DataFrame,
 
         if (eq_params is not None and eq_params.enabled and
                 eq_params.method == "anchor_items" and
-                eq_params.reference_forms):
-            ref_form    = eq_params.reference_forms[-1]   # last = most recent
+                fidx > 0):           # first form has no previous reference
+
+            # Reference = the immediately preceding assembled form
+            ref_form    = results[fidx - 1][0]
             total_slots = sum(s.count for s in params.slots)
             n_anchors   = max(1, int(
                 round(eq_params.overlap_pct / 100.0 * total_slots)))
 
+            # Temporarily allow reuse so _select_anchor_items can find
+            # questions that were used in the previous form.
+            # Anchor items MUST come from the previous form so they are
+            # by definition "already used once".
             anchor_df = _select_anchor_items(
                 ref_form, n_anchors, eq_params,
-                set(),          # no items selected yet this form
-                dict(usage),
+                set(),      # no items selected yet this form
+                {},         # pass empty usage so reuse cap doesn't block anchors
                 dcol, block_prefix,
             )
+
             if not anchor_df.empty:
                 pre_selected = set(anchor_df["QuestionID"].astype(str).tolist()) \
                                if "QuestionID" in anchor_df.columns else set()
-                # Reduce slot counts proportionally by n actual anchors
-                got       = len(anchor_df)
+
+                # Reduce each slot's count by how many anchors cover it
                 cat_col_a = "Category" if "Category" in anchor_df.columns else None
-                from dataclasses import replace as _dc_replace
                 new_slots = []
-                remaining = got
                 for slot in params.slots:
                     if cat_col_a and cat_col_a in anchor_df.columns:
-                        slot_anchors = int((anchor_df[cat_col_a].astype(str) ==
-                                           str(slot.label)).sum())
+                        slot_anchors = int(
+                            (anchor_df[cat_col_a].astype(str) == str(slot.label)).sum()
+                        )
                     else:
+                        # Distribute anchors evenly across slots when no
+                        # category column is available
                         slot_anchors = 0
                     new_count = max(0, slot.count - slot_anchors)
                     new_slots.append(SlotDef(
                         label=slot.label, filters=slot.filters,
                         count=new_count, bins=slot.bins))
-                from dataclasses import replace as _dc_replace2
+
                 adj_params = AssemblyParams(**{
                     **params.__dict__,
                     "slots": new_slots,
+                    # Allow previously used questions in the remaining pool
+                    # (anchors already accounted for separately)
+                    "allow_reuse": True,
+                    "max_reuse": max(params.max_reuse, 2),
                 })
+
+                # Validate
+                got_anchors = len(anchor_df)
+                if got_anchors < n_anchors:
+                    log.warning(
+                        "Equating %s: wanted %d anchor items but only %d "
+                        "approved (Stats=%s) items available.",
+                        name, n_anchors, got_anchors, STATS_APPROVED)
+
             equating_anchor_map[name] = anchor_df
 
         engine = AssemblyEngine(bank, adj_params, dcol, dict(usage),
@@ -2290,15 +2320,46 @@ def assemble_forms(bank: pd.DataFrame,
         engine.ub_usage = ub_usage   # share the session-level UB counter
         best_form, best_mean, best_warns = engine.assemble_one_form(fidx + 1)
 
-        # Merge anchor rows into the form
+        # Merge anchor rows into the form (anchors go first, then assembled)
         if not anchor_df.empty:
-            anchor_df["_form"] = fidx + 1
+            anchor_df = anchor_df.copy()
+            anchor_df["_form"]   = fidx + 1
+            anchor_df["_anchor"] = True    # tag for export
             best_form = pd.concat([anchor_df, best_form], ignore_index=True)
+            # Remove helper columns added during processing but keep _anchor tag
             best_form = best_form.drop(columns=[
-                c for c in best_form.columns if c.startswith("_")], errors="ignore")
+                c for c in best_form.columns
+                if c.startswith("_") and c not in ("_anchor",)
+            ], errors="ignore")
+            # Deduplicate: anchor QIDs may also have been picked by assembly
+            if "QuestionID" in best_form.columns:
+                best_form = best_form[
+                    ~best_form.duplicated(subset=["QuestionID"], keep="first")
+                ].reset_index(drop=True)
+
             diffs = pd.to_numeric(best_form[dcol], errors="coerce").dropna()
             best_mean = float(diffs.mean()) if not diffs.empty else best_mean
-            # Mark anchors as used in usage counter
+
+            # Validate actual overlap
+            if fidx > 0 and "QuestionID" in best_form.columns:
+                prev_qids = set(results[fidx-1][0]["QuestionID"].astype(str).tolist()) \
+                            if "QuestionID" in results[fidx-1][0].columns else set()
+                curr_qids = set(best_form["QuestionID"].dropna().astype(str).tolist())
+                actual_overlap = len(curr_qids & prev_qids)
+                total_q = len(curr_qids)
+                actual_pct = round(100.0 * actual_overlap / max(total_q, 1), 1)
+                log.info("Equating %s: %d/%d items are common with %s  "
+                         "(%.1f%% overlap, target %.0f%%)",
+                         name, actual_overlap, total_q,
+                         form_names[fidx-1], actual_pct,
+                         eq_params.overlap_pct if eq_params else 0)
+                if actual_overlap < len(pre_selected):
+                    best_warns.append(
+                        f"Equating: only {actual_overlap} of "
+                        f"{len(pre_selected)} requested anchor items "
+                        f"could be placed in {name}.")
+
+            # Mark anchors as used in the global usage counter
             for qid in pre_selected:
                 usage[qid] = usage.get(qid, 0) + 1
 
@@ -3030,8 +3091,16 @@ def analyse_form_1pl(
         return None
 
     df = form_df.copy()
-    df["_p"]     = pd.to_numeric(df.get(dcol, 0.5), errors="coerce").fillna(0.5).clip(1e-4, 1-1e-4)
-    df["_delta"] = df["_p"].map(_to_delta)
+    # Use the bank's Difficulty value DIRECTLY as Delta.
+    # The STGS bank stores the calibrated item difficulty (Delta / b) in the
+    # Difficulty column — do NOT apply any logit conversion.
+    # If the bank uses IRT logit scale (e.g. -1.25, 0.50, 1.75) those values
+    # are used as-is; if it uses classical 0-1 scale those values are used
+    # as-is too.  The P-value column is derived as P(θ=0) = 1/(1+exp(-b))
+    # for reference only.
+    df["_delta"] = pd.to_numeric(df.get(dcol, 0.5), errors="coerce").fillna(0.5)
+    # P-value: the probability of correct response at θ=0  (informational only)
+    df["_p"]     = 1.0 / (1.0 + np.exp(-df["_delta"]))
     K            = len(df)
 
     b          = df["_delta"].to_numpy(float)
@@ -3126,7 +3195,8 @@ def write_1pl_result_workbook(
     # ── Sheet 1: Item Statistics ──────────────────────────────────────────
     ws1 = wb.create_sheet("Item Statistics")
     hdrs1 = ["Item ID","Domain","Subdomain","Stage","Level/Part",
-             "Delta","Difficulty Label","P-value","Item Usage Count",
+             "Delta (bank value)","Difficulty Label",
+             "P-value (at θ=0)","Item Usage Count",
              "Exposure Rate (%)","Form IDs","Status"]
     ws1.merge_cells("A1:L1")
     c = ws1["A1"]; c.value = "1PL Item Statistics"
@@ -3508,8 +3578,7 @@ def write_equating_report(
         if anchor_df.empty:
             continue
         for _, row in anchor_df.iterrows():
-            delta = _to_delta(float(pd.to_numeric(
-                row.get(dcol, 0.5), errors="coerce") or 0.5))
+            delta = float(pd.to_numeric(row.get(dcol, 0.0), errors="coerce") or 0.0)
             for ci, v in enumerate([
                 fname,
                 row.get("QuestionID",""),
@@ -3548,7 +3617,7 @@ def write_equating_report(
             zip(form_names, results), 3):
         diffs = pd.to_numeric(form.get(dcol, pd.Series(dtype=float)),
                                errors="coerce").dropna()
-        deltas = diffs.map(_to_delta)
+        deltas = diffs   # Difficulty IS Delta (no conversion)
         for ci, v in enumerate([
             fname,
             round(float(diffs.mean()), 4) if not diffs.empty else "N/A",
