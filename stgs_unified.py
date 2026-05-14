@@ -592,11 +592,10 @@ class AssemblyParams:
     cct_profile:       str = "Common"
     # ── Feature 4: Fallback for difficulty (dedicated reuse for mean targets) ─
     allow_fallback_reuse: bool = False
-    # ── Psychometric model ────────────────────────────────────────────────────
-    # "3pl" = full 3PL (default);  "1pl" = 1PL / Rasch (Delta-only)
+    # ── Psychometric model selection (does NOT affect assembly logic) ─────────
+    # "3pl" = existing 3PL analysis (default, unchanged behaviour)
+    # "1pl" = 1PL/Rasch analysis — generates 1PL_Result.xlsx instead of 3PL
     psychometric_model: str = "3pl"
-    # ── Test Equating (optional) ──────────────────────────────────────────────
-    equating: Optional[object] = field(default=None)   # EquatingParams | None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2226,142 +2225,20 @@ def assemble_forms(bank: pd.DataFrame,
         return _check_scope_mean(form, dcol, mn_range,
                                  params.difficulty_scope, domain_col)
 
-    # Test Equating: track anchor items selected per form
-    equating_anchor_map: dict[str, pd.DataFrame] = {}
-
     for fidx, name in enumerate(form_names):
         # Derive stage-level prefix from the block name for Used Blocks filtering.
+        # Block IDs follow the pattern  CODE-Stage.Level.Number
+        # e.g. "GAT-2.1.006" → prefix "GAT-2.1"
+        #      "GAT-1.2.003" → prefix "GAT-1.2"
+        #      "Form_1"      → None (no filtering, backward compatible)
         import re as _re
         _m = _re.match(r'^([A-Za-z]+-\d+\.\d+)\.\d+$', str(name))
         block_prefix = _m.group(1) if _m else None
 
-        # ── Test Equating — pre-lock anchor items ─────────────────────────
-        #
-        # For method="anchor_items":
-        #   1. The PREVIOUS assembled form (results[fidx-1]) is always used
-        #      as the reference — no external reference_forms list needed.
-        #      Form 1 has no reference and gets zero anchors (correct).
-        #   2. Anchors are taken from approved items (Stats == معتمد).
-        #   3. Anchors bypass the normal reuse restriction — they are
-        #      INTENTIONALLY repeated across forms (that is the whole point
-        #      of anchor/common-item equating).
-        #   4. Remaining slots are reduced by the number of locked anchors
-        #      so the engine only needs to fill the non-anchor positions.
-        #   5. Anchors are merged back into the final form after assembly.
-        #   6. Actual overlap is validated and logged.
-        anchor_df    = pd.DataFrame()
-        eq_params    = params.equating
-        pre_selected: set[str] = set()
-        adj_params   = params   # may be replaced with reduced-count version
-
-        if (eq_params is not None and eq_params.enabled and
-                eq_params.method == "anchor_items" and
-                fidx > 0):           # first form has no previous reference
-
-            # Reference = the immediately preceding assembled form
-            ref_form    = results[fidx - 1][0]
-            total_slots = sum(s.count for s in params.slots)
-            n_anchors   = max(1, int(
-                round(eq_params.overlap_pct / 100.0 * total_slots)))
-
-            # Temporarily allow reuse so _select_anchor_items can find
-            # questions that were used in the previous form.
-            # Anchor items MUST come from the previous form so they are
-            # by definition "already used once".
-            anchor_df = _select_anchor_items(
-                ref_form, n_anchors, eq_params,
-                set(),      # no items selected yet this form
-                {},         # pass empty usage so reuse cap doesn't block anchors
-                dcol, block_prefix,
-            )
-
-            if not anchor_df.empty:
-                pre_selected = set(anchor_df["QuestionID"].astype(str).tolist()) \
-                               if "QuestionID" in anchor_df.columns else set()
-
-                # Reduce each slot's count by how many anchors cover it
-                cat_col_a = "Category" if "Category" in anchor_df.columns else None
-                new_slots = []
-                for slot in params.slots:
-                    if cat_col_a and cat_col_a in anchor_df.columns:
-                        slot_anchors = int(
-                            (anchor_df[cat_col_a].astype(str) == str(slot.label)).sum()
-                        )
-                    else:
-                        # Distribute anchors evenly across slots when no
-                        # category column is available
-                        slot_anchors = 0
-                    new_count = max(0, slot.count - slot_anchors)
-                    new_slots.append(SlotDef(
-                        label=slot.label, filters=slot.filters,
-                        count=new_count, bins=slot.bins))
-
-                adj_params = AssemblyParams(**{
-                    **params.__dict__,
-                    "slots": new_slots,
-                    # Allow previously used questions in the remaining pool
-                    # (anchors already accounted for separately)
-                    "allow_reuse": True,
-                    "max_reuse": max(params.max_reuse, 2),
-                })
-
-                # Validate
-                got_anchors = len(anchor_df)
-                if got_anchors < n_anchors:
-                    log.warning(
-                        "Equating %s: wanted %d anchor items but only %d "
-                        "approved (Stats=%s) items available.",
-                        name, n_anchors, got_anchors, STATS_APPROVED)
-
-            equating_anchor_map[name] = anchor_df
-
-        engine = AssemblyEngine(bank, adj_params, dcol, dict(usage),
+        engine = AssemblyEngine(bank, params, dcol, dict(usage),
                                 block_prefix=block_prefix)
         engine.ub_usage = ub_usage   # share the session-level UB counter
         best_form, best_mean, best_warns = engine.assemble_one_form(fidx + 1)
-
-        # Merge anchor rows into the form (anchors go first, then assembled)
-        if not anchor_df.empty:
-            anchor_df = anchor_df.copy()
-            anchor_df["_form"]   = fidx + 1
-            anchor_df["_anchor"] = True    # tag for export
-            best_form = pd.concat([anchor_df, best_form], ignore_index=True)
-            # Remove helper columns added during processing but keep _anchor tag
-            best_form = best_form.drop(columns=[
-                c for c in best_form.columns
-                if c.startswith("_") and c not in ("_anchor",)
-            ], errors="ignore")
-            # Deduplicate: anchor QIDs may also have been picked by assembly
-            if "QuestionID" in best_form.columns:
-                best_form = best_form[
-                    ~best_form.duplicated(subset=["QuestionID"], keep="first")
-                ].reset_index(drop=True)
-
-            diffs = pd.to_numeric(best_form[dcol], errors="coerce").dropna()
-            best_mean = float(diffs.mean()) if not diffs.empty else best_mean
-
-            # Validate actual overlap
-            if fidx > 0 and "QuestionID" in best_form.columns:
-                prev_qids = set(results[fidx-1][0]["QuestionID"].astype(str).tolist()) \
-                            if "QuestionID" in results[fidx-1][0].columns else set()
-                curr_qids = set(best_form["QuestionID"].dropna().astype(str).tolist())
-                actual_overlap = len(curr_qids & prev_qids)
-                total_q = len(curr_qids)
-                actual_pct = round(100.0 * actual_overlap / max(total_q, 1), 1)
-                log.info("Equating %s: %d/%d items are common with %s  "
-                         "(%.1f%% overlap, target %.0f%%)",
-                         name, actual_overlap, total_q,
-                         form_names[fidx-1], actual_pct,
-                         eq_params.overlap_pct if eq_params else 0)
-                if actual_overlap < len(pre_selected):
-                    best_warns.append(
-                        f"Equating: only {actual_overlap} of "
-                        f"{len(pre_selected)} requested anchor items "
-                        f"could be placed in {name}.")
-
-            # Mark anchors as used in the global usage counter
-            for qid in pre_selected:
-                usage[qid] = usage.get(qid, 0) + 1
 
         # ── Adaptive Mean Control (runs BEFORE the retry loop) ─────────────
         # When enabled, attempt a targeted swap-correction pass first.
@@ -2477,10 +2354,7 @@ def assemble_forms(bank: pd.DataFrame,
                  " [mean OK]" if success else " [mean MISSED]")
         results.append((best_form, best_mean, best_warns))
 
-    # Return anchor_map alongside results so gen-threads can use it
-    # without breaking any existing callers that only unpack the list.
-    # Callers that need it can check  isinstance(results, tuple).
-    return results, equating_anchor_map
+    return results
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  3PL PSYCHOMETRIC ANALYSIS
@@ -2969,48 +2843,58 @@ def write_analysis_workbook(analyses: list[FormAnalysis], out_path: Path):
     log.info("3PL analysis → %s", out_path)
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  1PL / RASCH PSYCHOMETRIC MODULE
+#  1PL / RASCH PSYCHOMETRIC MODULE  (optional — does NOT affect assembly)
 # ═════════════════════════════════════════════════════════════════════════════
 #
-# One-Parameter Logistic (Rasch) model:
-#   P(θ) = 1 / (1 + exp(-(θ - b)))
-#   I(θ) = P(θ) · (1 − P(θ))           (item information, no a/c weighting)
+# ISOLATION GUARANTEE
+# -------------------
+# • All functions in this section are NEW additions.
+# • No existing function is modified, renamed, or removed.
+# • The module is triggered ONLY when the user selects "1PL" in the GUI.
+# • When "3PL" is selected (the default) the module is never called and
+#   the system behaves exactly as the stable version.
 #
-# The system stores difficulty as a classical p-value (0–1).
-# Internally we convert  b_irt = logit(p) = ln(p / (1-p))
-# so that θ lives on the standard logit scale and the Delta classification
-# labels (< −1 Easy, −1 to +1 Medium, > +1 Hard) apply naturally.
+# MODEL
+# -----
+# 1PL / Rasch:   P(θ) = 1 / (1 + exp(-(θ − b)))
+# Item info:     I(θ) = P(θ) · (1 − P(θ))
+# TCC:           Expected score = Σ P(θ) across items
+# TIF:           Total information = Σ I(θ) across items
+#
+# DELTA (b)
+# ---------
+# The bank's Difficulty column is used DIRECTLY as Delta.
+# No logit or any other transformation is applied.
+# Delta classification uses a 0–1 scale matching the bank's range:
+#   Easy:   0.00 – 0.35
+#   Medium: 0.36 – 0.60
+#   Hard:   0.61 – 1.00
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Default difficulty label thresholds (IRT / logit scale)
-_1PL_THRESHOLDS: dict[str, float] = {"easy_max": -1.0, "hard_min": 1.0}
+# Default classification thresholds (0–1 scale, configurable)
+_1PL_EASY_MAX  = 0.35
+_1PL_HARD_MIN  = 0.61
 
 
-def _to_delta(p_val: float) -> float:
-    """Convert classical p-value (0–1) to IRT logit scale (Delta / b)."""
-    p_val = float(np.clip(p_val, 1e-4, 1 - 1e-4))
-    return float(np.log(p_val / (1.0 - p_val)))
-
-
-def _difficulty_label(delta: float,
-                      easy_max: float = -1.0,
-                      hard_min: float = 1.0) -> str:
-    """Classify an item by its Delta value."""
-    if delta < easy_max:
+def _1pl_label(delta: float,
+               easy_max: float = _1PL_EASY_MAX,
+               hard_min: float = _1PL_HARD_MIN) -> str:
+    """Classify an item by its Delta value using the 0–1 scale."""
+    if delta <= easy_max:
         return "Easy"
-    if delta > hard_min:
+    if delta >= hard_min:
         return "Hard"
     return "Medium"
 
 
-def _p1pl(theta: np.ndarray, b: np.ndarray) -> np.ndarray:
+def _1pl_probability(theta: np.ndarray, b: np.ndarray) -> np.ndarray:
     """
-    Vectorised 1PL probability  P(θ) = 1 / (1 + exp(-(θ − b))).
+    Vectorised 1PL probability  P(θ) = 1 / (1 + exp(−(θ − b))).
 
     Parameters
     ----------
-    theta : (N,)  ability values
-    b     : (K,)  item difficulties (IRT/logit scale)
+    theta : (N,) array of ability values
+    b     : (K,) array of item difficulties (bank Difficulty values, 0–1)
 
     Returns
     -------
@@ -3021,701 +2905,312 @@ def _p1pl(theta: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.clip(1.0 / (1.0 + np.exp(-(theta - b))), 1e-8, 1 - 1e-8)
 
 
-def _item_info_1pl(theta: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """
-    1PL item information  I(θ) = P(θ) · (1 − P(θ)).
-    Returns shape (N, K).
-    """
-    P = _p1pl(theta, b)
-    return P * (1.0 - P)
-
-
 @dataclass
-class OnePLAnalysis:
-    """All 1PL psychometric results for one assembled form."""
-    form_name:   str
-    n_items:     int
-    # Item-level
-    item_ids:    list          # QuestionID strings
-    deltas:      np.ndarray   # (K,) IRT-scale difficulties
-    p_values:    np.ndarray   # (K,) original 0–1 difficulties
-    labels:      list[str]    # Easy / Medium / Hard per item
-    domains:     list[str]
-    categories:  list[str]
-    usage_counts: list[int]   # how many forms each item appeared in
-    form_ids_per_item: list[str]   # pipe-separated form IDs for each item
-    # Form-level
-    mean_delta:  float
-    min_delta:   float
-    max_delta:   float
-    n_easy:      int
-    n_medium:    int
-    n_hard:      int
-    # Curves (61-point grid from −3 to +3)
-    theta_grid:  np.ndarray   # (61,)
-    tcc:         np.ndarray   # (61,)   Expected score
-    tif:         np.ndarray   # (61,)   Test Information
-    sem:         np.ndarray   # (61,)   Standard Error
+class OnePLFormAnalysis:
+    """
+    All 1PL psychometric statistics for one assembled form.
+    Completely separate from the existing FormAnalysis (3PL) dataclass.
+    """
+    form_name:     str
+    n_items:       int
+    # Item-level (K items)
+    item_ids:      list          # QuestionID strings
+    deltas:        np.ndarray   # (K,) bank Difficulty values  ← used as b
+    labels:        list[str]    # "Easy" / "Medium" / "Hard"
+    domains:       list[str]
+    categories:    list[str]
+    usage_counts:  list[int]    # cross-form use count per item
+    form_ids_map:  list[str]    # pipe-joined form names per item
+    # Form-level summary
+    mean_delta:    float
+    min_delta:     float
+    max_delta:     float
+    n_easy:        int
+    n_medium:      int
+    n_hard:        int
+    # Curves — 61-point θ grid from −3 to +3
+    theta_grid:    np.ndarray   # (61,)
+    tcc:           np.ndarray   # (61,)  expected score
+    tif:           np.ndarray   # (61,)  test information
+    sem:           np.ndarray   # (61,)  standard error 1/√TIF
 
 
 def analyse_form_1pl(
-        form_df: pd.DataFrame,
-        form_name: str,
-        dcol: str = "Difficulty",
-        domain_col: str = "D",
-        cat_col: str = "Category",
+        form_df:       pd.DataFrame,
+        form_name:     str,
+        dcol:          str           = "Difficulty",
+        domain_col:    str           = "D",
+        cat_col:       str           = "Category",
         usage_counter: Optional[dict] = None,
-        all_results: Optional[list] = None,
-        n_theta: int = 61,
-        easy_max: float = -1.0,
-        hard_min: float = 1.0,
-) -> Optional["OnePLAnalysis"]:
+        all_results:   Optional[list] = None,
+        n_theta:       int            = 61,
+        easy_max:      float          = _1PL_EASY_MAX,
+        hard_min:      float          = _1PL_HARD_MIN,
+) -> Optional[OnePLFormAnalysis]:
     """
-    Compute 1PL/Rasch psychometric statistics for a single assembled form.
+    Compute 1PL/Rasch statistics for one assembled form.
+
+    Delta = Difficulty column value, used directly with no transformation.
 
     Parameters
     ----------
-    form_df      : assembled form DataFrame
-    form_name    : label for this form (used in output)
-    dcol         : column name holding item difficulty (0–1 scale)
-    domain_col   : column holding domain/D values
-    cat_col      : column holding category/subdomain values
-    usage_counter: dict[QuestionID → use_count] for exposure analysis
-    all_results  : list of previous (form_df, mean, warns) tuples; used
-                   to determine which form IDs each item appeared in
-    n_theta      : number of θ grid points (default 61 from −3 to +3)
-    easy_max     : Delta threshold below which items are labelled Easy
-    hard_min     : Delta threshold above which items are labelled Hard
+    form_df       : assembled form DataFrame
+    form_name     : label used in the output
+    dcol          : difficulty column name (default "Difficulty")
+    domain_col    : domain column name    (default "D")
+    cat_col       : category column name  (default "Category")
+    usage_counter : dict[QuestionID → cross-form use count] for exposure
+    all_results   : list of (form_df, mean, warns) — used to build Form IDs
+    n_theta       : θ grid points (default 61)
+    easy_max      : upper threshold for "Easy" label
+    hard_min      : lower threshold for "Hard" label
+
+    Returns None if form_df is empty or missing the difficulty column.
     """
     if form_df is None or form_df.empty:
         return None
+    if dcol not in form_df.columns:
+        log.warning("analyse_form_1pl: column '%s' not found — skipping.", dcol)
+        return None
 
-    df = form_df.copy()
-    # Use the bank's Difficulty value DIRECTLY as Delta.
-    # The STGS bank stores the calibrated item difficulty (Delta / b) in the
-    # Difficulty column — do NOT apply any logit conversion.
-    # If the bank uses IRT logit scale (e.g. -1.25, 0.50, 1.75) those values
-    # are used as-is; if it uses classical 0-1 scale those values are used
-    # as-is too.  The P-value column is derived as P(θ=0) = 1/(1+exp(-b))
-    # for reference only.
-    df["_delta"] = pd.to_numeric(df.get(dcol, 0.5), errors="coerce").fillna(0.5)
-    # P-value: the probability of correct response at θ=0  (informational only)
-    df["_p"]     = 1.0 / (1.0 + np.exp(-df["_delta"]))
-    K            = len(df)
+    df    = form_df.copy()
+    b_raw = pd.to_numeric(df[dcol], errors="coerce").fillna(0.5)
+    b     = b_raw.to_numpy(float)          # Delta = raw bank value
+    K     = len(df)
 
-    b          = df["_delta"].to_numpy(float)
     theta_grid = np.linspace(-3.0, 3.0, n_theta)
+    P          = _1pl_probability(theta_grid, b)   # (n_theta, K)
+    tcc        = P.sum(axis=1)                      # (n_theta,)
+    info       = P * (1.0 - P)                      # (n_theta, K)
+    tif        = info.sum(axis=1)                   # (n_theta,)
+    sem        = 1.0 / np.sqrt(np.clip(tif, 1e-8, None))
 
-    tcc = _p1pl(theta_grid, b).sum(axis=1)                  # (n_theta,)
-    tif = _item_info_1pl(theta_grid, b).sum(axis=1)          # (n_theta,)
-    sem = 1.0 / np.sqrt(np.clip(tif, 1e-8, None))
+    labels = [_1pl_label(float(d), easy_max, hard_min) for d in b]
 
-    labels       = [_difficulty_label(d, easy_max, hard_min) for d in b]
-    n_easy       = labels.count("Easy")
-    n_medium     = labels.count("Medium")
-    n_hard       = labels.count("Hard")
+    item_ids   = df["QuestionID"].astype(str).tolist() \
+                 if "QuestionID" in df.columns else [f"Item{i+1}" for i in range(K)]
+    domains    = df[domain_col].astype(str).tolist() \
+                 if domain_col in df.columns else [""] * K
+    categories = df[cat_col].astype(str).tolist() \
+                 if cat_col    in df.columns else [""] * K
 
-    item_ids  = df["QuestionID"].astype(str).tolist() if "QuestionID" in df.columns \
-                else [f"Item{i+1}" for i in range(K)]
-    domains   = df[domain_col].astype(str).tolist() if domain_col in df.columns \
-                else [""] * K
-    categories= df[cat_col].astype(str).tolist()    if cat_col    in df.columns \
-                else [""] * K
+    uc            = usage_counter or {}
+    usage_counts  = [int(uc.get(qid, 1)) for qid in item_ids]
 
-    # Exposure: usage count per item
-    uc = usage_counter or {}
-    usage_counts = [int(uc.get(q, 1)) for q in item_ids]
-
-    # Which forms contain each item (from all_results if provided)
+    # Which forms contain each item
     if all_results:
-        form_ids_per_item = []
+        form_ids_map = []
         for qid in item_ids:
-            containing = []
-            for i, (fdf, _, _) in enumerate(all_results):
-                if "QuestionID" in fdf.columns and qid in fdf["QuestionID"].astype(str).values:
-                    containing.append(f"Form_{i+1}")
-            form_ids_per_item.append(" | ".join(containing) if containing else form_name)
+            names_containing = []
+            for ri, (fdf, _, _) in enumerate(all_results):
+                if "QuestionID" in fdf.columns and \
+                        qid in fdf["QuestionID"].astype(str).values:
+                    names_containing.append(f"Form_{ri + 1}")
+            form_ids_map.append(" | ".join(names_containing) or form_name)
     else:
-        form_ids_per_item = [form_name] * K
+        form_ids_map = [form_name] * K
 
-    return OnePLAnalysis(
+    return OnePLFormAnalysis(
         form_name=form_name, n_items=K,
-        item_ids=item_ids, deltas=b, p_values=df["_p"].to_numpy(float),
-        labels=labels, domains=domains, categories=categories,
-        usage_counts=usage_counts, form_ids_per_item=form_ids_per_item,
+        item_ids=item_ids, deltas=b, labels=labels,
+        domains=domains, categories=categories,
+        usage_counts=usage_counts, form_ids_map=form_ids_map,
         mean_delta=float(b.mean()), min_delta=float(b.min()),
         max_delta=float(b.max()),
-        n_easy=n_easy, n_medium=n_medium, n_hard=n_hard,
+        n_easy=labels.count("Easy"),
+        n_medium=labels.count("Medium"),
+        n_hard=labels.count("Hard"),
         theta_grid=theta_grid, tcc=tcc, tif=tif, sem=sem,
     )
 
 
 def write_1pl_result_workbook(
-        analyses_1pl: list["OnePLAnalysis"],
-        out_path: Path,
-        easy_max: float = -1.0,
-        hard_min: float = 1.0,
+        analyses:  list[OnePLFormAnalysis],
+        out_path:  Path,
+        easy_max:  float = _1PL_EASY_MAX,
+        hard_min:  float = _1PL_HARD_MIN,
 ) -> None:
     """
-    Write the 1PL_Result.xlsx workbook with seven sheets:
+    Write 1PL_Result.xlsx with seven sheets.
 
-      1. Item Statistics        – item-level Delta, label, usage
-      2. Form Summary           – per-form aggregate stats
-      3. TCC Data               – theta vs expected score (all forms)
-      4. TIF Data               – theta vs information (all forms)
-      5. Difficulty Distribution– Easy/Medium/Hard counts with chart
-      6. Exposure Analysis      – item usage frequencies
-      7. Domain Summary         – domain-level item counts per form
-    """
-    from openpyxl import Workbook
-    from openpyxl.chart import BarChart, LineChart, Reference
-    from openpyxl.styles import Font, PatternFill, Alignment, numbers
-    from openpyxl.utils import get_column_letter
-
-    if not analyses_1pl:
-        log.warning("write_1pl_result_workbook: no analyses to write.")
-        return
-
-    wb  = Workbook(); wb.remove(wb.active)
-    NV  = PatternFill("solid", fgColor="1F3864")   # navy
-    TP  = PatternFill("solid", fgColor="00AECB")   # teal
-    H_FONT = Font(bold=True, color="FFFFFF", size=10)
-    T_FONT = Font(bold=True, color="FFFFFF", size=11)
-
-    def _hdr(ws, row, col, val, fill=TP):
-        c = ws.cell(row=row, column=col, value=val)
-        c.fill = fill; c.font = H_FONT
-        c.alignment = Alignment(horizontal="center")
-        return c
-
-    def _col_w(ws, widths: list[int]):
-        for i, w in enumerate(widths, 1):
-            ws.column_dimensions[get_column_letter(i)].width = w
-
-    # ── Sheet 1: Item Statistics ──────────────────────────────────────────
-    ws1 = wb.create_sheet("Item Statistics")
-    hdrs1 = ["Item ID","Domain","Subdomain","Stage","Level/Part",
-             "Delta (bank value)","Difficulty Label",
-             "P-value (at θ=0)","Item Usage Count",
-             "Exposure Rate (%)","Form IDs","Status"]
-    ws1.merge_cells("A1:L1")
-    c = ws1["A1"]; c.value = "1PL Item Statistics"
-    c.fill = NV; c.font = Font(bold=True, color="FFFFFF", size=12)
-    c.alignment = Alignment(horizontal="center")
-    for ci, h in enumerate(hdrs1, 1):
-        _hdr(ws1, 2, ci, h)
-    _col_w(ws1, [16,12,14,9,10,10,16,10,16,16,24,12])
-
-    row = 3
-    # Collect global item pool across all forms
-    seen: dict[str, dict] = {}
-    for fa in analyses_1pl:
-        for i, qid in enumerate(fa.item_ids):
-            if qid not in seen:
-                seen[qid] = {
-                    "domain":   fa.domains[i] if i < len(fa.domains) else "",
-                    "category": fa.categories[i] if i < len(fa.categories) else "",
-                    "delta":    float(fa.deltas[i]),
-                    "p_val":    float(fa.p_values[i]),
-                    "label":    fa.labels[i],
-                    "uses":     fa.usage_counts[i],
-                    "form_ids": fa.form_ids_per_item[i],
-                }
-    n_total_items = sum(fa.n_items for fa in analyses_1pl)
-    for qid, info in seen.items():
-        exp_rate = round(100.0 * info["uses"] / max(len(analyses_1pl), 1), 1)
-        alt = (row % 2 == 0)
-        row_fill = PatternFill("solid", fgColor="EAF0FA") if alt else PatternFill()
-        vals = [qid, info["domain"], info["category"], "", "",
-                round(info["delta"], 4), info["label"],
-                round(info["p_val"], 4), info["uses"], exp_rate,
-                info["form_ids"], "Active"]
-        for ci, v in enumerate(vals, 1):
-            c2 = ws1.cell(row=row, column=ci, value=v)
-            c2.fill = row_fill
-        row += 1
-
-    # ── Sheet 2: Form Summary ─────────────────────────────────────────────
-    ws2 = wb.create_sheet("Form Summary")
-    hdrs2 = ["Form","N Items","Mean Delta","Min Delta","Max Delta",
-             "Easy","Medium","Hard","Mean P-value"]
-    ws2.merge_cells(f"A1:{get_column_letter(len(hdrs2))}1")
-    c = ws2["A1"]; c.value = "1PL Form Summary"
-    c.fill = NV; c.font = Font(bold=True, color="FFFFFF", size=12)
-    c.alignment = Alignment(horizontal="center")
-    for ci, h in enumerate(hdrs2, 1):
-        _hdr(ws2, 2, ci, h)
-    _col_w(ws2, [22,9,12,11,11,8,9,8,12])
-
-    for ri, fa in enumerate(analyses_1pl, 3):
-        alt = (ri % 2 == 0)
-        fill = PatternFill("solid", fgColor="EAF0FA") if alt else PatternFill()
-        vals = [fa.form_name, fa.n_items,
-                round(fa.mean_delta,4), round(fa.min_delta,4), round(fa.max_delta,4),
-                fa.n_easy, fa.n_medium, fa.n_hard,
-                round(float(fa.p_values.mean()),4)]
-        for ci, v in enumerate(vals, 1):
-            ws2.cell(row=ri, column=ci, value=v).fill = fill
-
-    # ── Sheet 3: TCC Data ─────────────────────────────────────────────────
-    ws3 = wb.create_sheet("TCC Data")
-    ws3.merge_cells(f"A1:{get_column_letter(len(analyses_1pl)+1)}1")
-    c = ws3["A1"]; c.value = "Test Characteristic Curves (1PL)"
-    c.fill = NV; c.font = Font(bold=True, color="FFFFFF", size=12)
-    c.alignment = Alignment(horizontal="center")
-    _hdr(ws3, 2, 1, "Theta")
-    for ci, fa in enumerate(analyses_1pl, 2):
-        _hdr(ws3, 2, ci, fa.form_name)
-    theta_grid = analyses_1pl[0].theta_grid
-    for ri, th in enumerate(theta_grid, 3):
-        ws3.cell(row=ri, column=1, value=round(float(th), 2))
-        for ci, fa in enumerate(analyses_1pl, 2):
-            ws3.cell(row=ri, column=ci, value=round(float(fa.tcc[ri-3]), 4))
-
-    n_th = len(theta_grid); nc = len(analyses_1pl)
-    chart3 = LineChart(); chart3.title = "TCC (1PL)"; chart3.style = 10
-    chart3.y_axis.title = "Expected Score"; chart3.x_axis.title = "Ability (θ)"
-    dr3 = Reference(ws3, min_col=2, min_row=2, max_col=1+nc, max_row=2+n_th)
-    cr3 = Reference(ws3, min_col=1, min_row=3, max_row=2+n_th)
-    chart3.add_data(dr3, titles_from_data=True); chart3.set_categories(cr3)
-    chart3.width = 18; chart3.height = 12
-    ws3.add_chart(chart3, f"{get_column_letter(nc+3)}3")
-
-    # ── Sheet 4: TIF Data ─────────────────────────────────────────────────
-    ws4 = wb.create_sheet("TIF Data")
-    ws4.merge_cells(f"A1:{get_column_letter(len(analyses_1pl)+1)}1")
-    c = ws4["A1"]; c.value = "Test Information Functions (1PL)"
-    c.fill = NV; c.font = Font(bold=True, color="FFFFFF", size=12)
-    c.alignment = Alignment(horizontal="center")
-    _hdr(ws4, 2, 1, "Theta")
-    for ci, fa in enumerate(analyses_1pl, 2):
-        _hdr(ws4, 2, ci, fa.form_name)
-    for ri, th in enumerate(theta_grid, 3):
-        ws4.cell(row=ri, column=1, value=round(float(th), 2))
-        for ci, fa in enumerate(analyses_1pl, 2):
-            ws4.cell(row=ri, column=ci, value=round(float(fa.tif[ri-3]), 6))
-
-    chart4 = LineChart(); chart4.title = "TIF (1PL)"; chart4.style = 10
-    chart4.y_axis.title = "Information"; chart4.x_axis.title = "Ability (θ)"
-    dr4 = Reference(ws4, min_col=2, min_row=2, max_col=1+nc, max_row=2+n_th)
-    cr4 = Reference(ws4, min_col=1, min_row=3, max_row=2+n_th)
-    chart4.add_data(dr4, titles_from_data=True); chart4.set_categories(cr4)
-    chart4.width = 18; chart4.height = 12
-    ws4.add_chart(chart4, f"{get_column_letter(nc+3)}3")
-
-    # ── Sheet 5: Difficulty Distribution ─────────────────────────────────
-    ws5 = wb.create_sheet("Difficulty Distribution")
-    ws5.merge_cells(f"A1:D1")
-    c = ws5["A1"]; c.value = "Difficulty Distribution by Form (1PL)"
-    c.fill = NV; c.font = Font(bold=True, color="FFFFFF", size=12)
-    c.alignment = Alignment(horizontal="center")
-    for ci, h in enumerate(["Form","Easy","Medium","Hard"], 1):
-        _hdr(ws5, 2, ci, h)
-    for ri, fa in enumerate(analyses_1pl, 3):
-        ws5.cell(row=ri, column=1, value=fa.form_name)
-        ws5.cell(row=ri, column=2, value=fa.n_easy)
-        ws5.cell(row=ri, column=3, value=fa.n_medium)
-        ws5.cell(row=ri, column=4, value=fa.n_hard)
-
-    n_forms_dd = len(analyses_1pl)
-    chart5 = BarChart(); chart5.type = "col"; chart5.grouping = "clustered"
-    chart5.title = "Difficulty Distribution (1PL)"
-    chart5.y_axis.title = "Count"; chart5.x_axis.title = "Form"
-    chart5.style = 10
-    dr5 = Reference(ws5, min_col=2, min_row=2, max_col=4, max_row=2+n_forms_dd)
-    cr5 = Reference(ws5, min_col=1, min_row=3, max_row=2+n_forms_dd)
-    chart5.add_data(dr5, titles_from_data=True); chart5.set_categories(cr5)
-    chart5.width = 16; chart5.height = 10
-    ws5.add_chart(chart5, "F3")
-
-    # ── Sheet 6: Exposure Analysis ────────────────────────────────────────
-    ws6 = wb.create_sheet("Exposure Analysis")
-    _hdr(ws6, 1, 1, "QuestionID"); _hdr(ws6, 1, 2, "Times Used")
-    _hdr(ws6, 1, 3, "Exposure Rate (%)"); _hdr(ws6, 1, 4, "Delta")
-    _hdr(ws6, 1, 5, "Label")
-    ws6.column_dimensions["A"].width = 18; ws6.column_dimensions["B"].width = 12
-    ws6.column_dimensions["C"].width = 18; ws6.column_dimensions["D"].width = 10
-    ws6.column_dimensions["E"].width = 12
-    n_forms_exp = max(len(analyses_1pl), 1)
-    for ri, (qid, info) in enumerate(seen.items(), 2):
-        exp_rate = round(100.0 * info["uses"] / n_forms_exp, 1)
-        ws6.cell(row=ri, column=1, value=qid)
-        ws6.cell(row=ri, column=2, value=info["uses"])
-        ws6.cell(row=ri, column=3, value=exp_rate)
-        ws6.cell(row=ri, column=4, value=round(info["delta"],4))
-        ws6.cell(row=ri, column=5, value=info["label"])
-
-    # ── Sheet 7: Domain Summary ───────────────────────────────────────────
-    ws7 = wb.create_sheet("Domain Summary")
-    ws7.merge_cells("A1:C1")
-    c = ws7["A1"]; c.value = "Domain Item Counts per Form (1PL)"
-    c.fill = NV; c.font = Font(bold=True, color="FFFFFF", size=12)
-    c.alignment = Alignment(horizontal="center")
-    _hdr(ws7, 2, 1, "Form"); _hdr(ws7, 2, 2, "Domain"); _hdr(ws7, 2, 3, "Count")
-    ws7.column_dimensions["A"].width = 22
-    ws7.column_dimensions["B"].width = 16
-    ws7.column_dimensions["C"].width = 10
-    row7 = 3
-    for fa in analyses_1pl:
-        from collections import Counter
-        dom_counts = Counter(fa.domains)
-        for dom, cnt in sorted(dom_counts.items()):
-            ws7.cell(row=row7, column=1, value=fa.form_name)
-            ws7.cell(row=row7, column=2, value=dom)
-            ws7.cell(row=row7, column=3, value=cnt)
-            row7 += 1
-
-    wb.save(str(out_path))
-    log.info("1PL Result → %s", out_path)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  TEST EQUATING MODULE
-# ═════════════════════════════════════════════════════════════════════════════
-#
-# Two equating methods:
-#   Method 1 — Question Bank Statistics:
-#     Enhanced matching (difficulty, domain, TIF shape). No mandatory overlap.
-#   Method 2 — Common / Anchor Items:
-#     Pre-lock N% of questions from a reference form as anchor items.
-#     Anchor items MUST have Stats == "معتمد" (Approved).
-# ─────────────────────────────────────────────────────────────────────────────
-
-STATS_APPROVED = "معتمد"    # Only questions with this Stats value may be anchors
-STATS_PILOT    = "تجريبي"   # Pilot items — never used as anchors
-
-
-@dataclass
-class EquatingParams:
-    """Configuration for the Test Equating module."""
-    enabled:           bool  = False
-    method:            str   = "bank_stats"   # "bank_stats" | "anchor_items"
-    # Anchor / Common Items settings (method="anchor_items" only)
-    overlap_pct:       float = 20.0    # % of form size to reuse as anchor items
-    domain_balance_pct:float = 90.0    # required domain distribution similarity %
-    reference_forms:   list  = field(default_factory=list)  # list[pd.DataFrame]
-    stats_col:         str   = "Stats"   # column name holding "معتمد"/"تجريبي"
-    # Anchor item constraints
-    max_anchor_reuse:  int   = 3       # never exceed this total reuse count
-    require_same_domain: bool = True
-    require_same_stage:  bool = True
-
-
-def _select_anchor_items(
-        reference_form: pd.DataFrame,
-        n_anchors: int,
-        params: EquatingParams,
-        already_used: set,
-        question_usage: dict,
-        dcol: str,
-        block_prefix: Optional[str] = None,
-) -> pd.DataFrame:
-    """
-    Select `n_anchors` anchor/common items from `reference_form`.
-
-    Rules (all mandatory):
-      1. Stats == "معتمد"  (STATS_APPROVED) — experimental items forbidden
-      2. QuestionID not already in `already_used` (current form)
-      3. question_usage[qid] < max_anchor_reuse
-      4. Stage-level prefix must match block_prefix if provided
-    Returns a DataFrame of selected anchor rows (may be smaller than
-    n_anchors if not enough qualifying items exist).
-    """
-    if reference_form.empty or n_anchors <= 0:
-        return pd.DataFrame()
-
-    df = reference_form.copy()
-
-    # Rule 1: approved items only
-    stats_col = params.stats_col
-    if stats_col in df.columns:
-        df = df[df[stats_col].astype(str) == STATS_APPROVED]
-
-    # Rule 2: not already in this form
-    if already_used and "QuestionID" in df.columns:
-        df = df[~df["QuestionID"].astype(str).isin(already_used)]
-
-    # Rule 3: reuse cap
-    if "QuestionID" in df.columns:
-        df = df[df["QuestionID"].astype(str).map(
-            lambda q: question_usage.get(q, 0) < params.max_anchor_reuse
-        )]
-
-    # Rule 4: stage-level prefix matching (same as Used Blocks rule)
-    if block_prefix and "Block-ID" in df.columns:
-        df = df[df["Block-ID"].astype(str).str.startswith(block_prefix + ".")]
-
-    if df.empty:
-        return df
-
-    # Sort: least-used first, then by difficulty proximity to reference mean
-    if "QuestionID" in df.columns:
-        df = df.copy()
-        df["_uses"] = df["QuestionID"].astype(str).map(
-            lambda q: question_usage.get(q, 0))
-        ref_mean = pd.to_numeric(reference_form.get(dcol, pd.Series([0.5])),
-                                  errors="coerce").mean()
-        diff = pd.to_numeric(df.get(dcol, 0.5), errors="coerce").fillna(0.5)
-        df["_dist"] = (diff - ref_mean).abs()
-        df = df.sort_values(["_uses", "_dist"]).drop(
-            columns=["_uses", "_dist"], errors="ignore")
-
-    return df.head(n_anchors).copy()
-
-
-def _domain_balance_score(form_a: pd.DataFrame,
-                           form_b: pd.DataFrame,
-                           domain_col: str = "D") -> float:
-    """
-    Return a 0–1 similarity score between two forms' domain distributions.
-    1.0 = identical distributions, 0.0 = no overlap.
-    """
-    if domain_col not in form_a.columns or domain_col not in form_b.columns:
-        return 1.0
-
-    from collections import Counter
-    def _props(df):
-        c = Counter(df[domain_col].dropna().astype(str))
-        t = max(sum(c.values()), 1)
-        return {k: v/t for k, v in c.items()}
-
-    p_a = _props(form_a)
-    p_b = _props(form_b)
-    all_keys = set(p_a) | set(p_b)
-    diff = sum(abs(p_a.get(k, 0) - p_b.get(k, 0)) for k in all_keys)
-    return max(0.0, 1.0 - diff / 2.0)
-
-
-def write_equating_report(
-        results: list[tuple[pd.DataFrame, float, list[str]]],
-        form_names: list[str],
-        equating_params: EquatingParams,
-        anchor_map: dict,          # form_name → DataFrame of anchor items
-        dcol: str,
-        domain_col: str,
-        psychometric_mode: str,    # "3pl" | "1pl"
-        analyses_3pl: Optional[list] = None,
-        analyses_1pl: Optional[list["OnePLAnalysis"]] = None,
-        out_path: Path = None,
-) -> None:
-    """
-    Write Equating_Report.xlsx with eight sheets:
-
-      1. Equating Summary     – method, overlap %, reference form, stats
-      2. Common Items         – anchor item list per form pair
-      3. Domain Comparison    – domain distribution similarity
-      4. Difficulty Comparison– Delta / p-value stats comparison
-      5. TIF Comparison       – theta vs info (line chart)
-      6. TCC Comparison       – theta vs expected score (line chart)
-      7. Overlap Statistics   – anchor usage summary
-      8. Exposure Analysis    – per-item exposure across all forms
+    Sheet layout
+    ────────────
+    1. Item Statistics       item-level Delta, label, usage, exposure
+    2. Form Summary          per-form aggregate statistics
+    3. TCC Data              θ vs expected score (all forms) + line chart
+    4. TIF Data              θ vs information   (all forms) + line chart
+    5. Difficulty Distribution Easy/Medium/Hard counts + bar chart
+    6. Exposure Analysis     item usage frequency across all forms
+    7. Domain Summary        domain item counts per form
     """
     from openpyxl import Workbook
     from openpyxl.chart import BarChart, LineChart, Reference
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
-    from collections import Counter
+
+    if not analyses:
+        log.warning("write_1pl_result_workbook: nothing to write.")
+        return
 
     wb  = Workbook(); wb.remove(wb.active)
     NV  = PatternFill("solid", fgColor="1F3864")
     TP  = PatternFill("solid", fgColor="00AECB")
-    GR  = PatternFill("solid", fgColor="3BB573")
-    H_FONT = Font(bold=True, color="FFFFFF", size=10)
-    T_FONT = Font(bold=True, color="FFFFFF", size=12)
+    H   = Font(bold=True, color="FFFFFF", size=10)
+    T   = Font(bold=True, color="FFFFFF", size=12)
+    ALT = PatternFill("solid", fgColor="EAF0FA")
 
-    def _hdr(ws, row, col, val, fill=TP):
+    def hdr(ws, row, col, val, fill=TP):
         c = ws.cell(row=row, column=col, value=val)
-        c.fill = fill; c.font = H_FONT
-        c.alignment = Alignment(horizontal="center")
-        return c
-
-    def _title(ws, val, cols):
-        ws.merge_cells(f"A1:{get_column_letter(cols)}1")
-        c = ws["A1"]; c.value = val; c.fill = NV; c.font = T_FONT
+        c.fill = fill; c.font = H
         c.alignment = Alignment(horizontal="center")
 
-    n_forms = len(results)
-    theta_grid = np.linspace(-3.0, 3.0, 61)
+    def title(ws, val, ncols):
+        ws.merge_cells(f"A1:{get_column_letter(ncols)}1")
+        c = ws["A1"]; c.value = val; c.fill = NV; c.font = T
+        c.alignment = Alignment(horizontal="center")
 
-    # ── Sheet 1: Equating Summary ─────────────────────────────────────────
-    ws1 = wb.create_sheet("Equating Summary")
-    _title(ws1, "Test Equating Summary", 3)
-    for ci, h in enumerate(["Parameter","Value","Notes"], 1):
-        _hdr(ws1, 2, ci, h)
-    rows_s1 = [
-        ("Equating Method",
-         "Common/Anchor Items" if equating_params.method == "anchor_items"
-         else "Question Bank Statistics", ""),
-        ("Psychometric Mode", psychometric_mode.upper(), ""),
-        ("Overlap (%)", f"{equating_params.overlap_pct:.0f}%",
-         "Applied" if equating_params.method == "anchor_items" else "N/A"),
-        ("Domain Balance (%)", f"{equating_params.domain_balance_pct:.0f}%", ""),
-        ("Anchor Stats Filter", STATS_APPROVED, "Experimental items excluded"),
-        ("Max Anchor Reuse", equating_params.max_anchor_reuse, ""),
-        ("Number of Forms", n_forms, ""),
-        ("Total Items Across Forms",
-         sum(len(r[0]) for r in results), ""),
-    ]
-    for ri, (p, v, n) in enumerate(rows_s1, 3):
-        alt = ri % 2 == 0
-        fill = PatternFill("solid", fgColor="EAF0FA") if alt else PatternFill()
-        for ci, x in enumerate([p, v, n], 1):
-            ws1.cell(row=ri, column=ci, value=x).fill = fill
-    ws1.column_dimensions["A"].width = 28
-    ws1.column_dimensions["B"].width = 24
-    ws1.column_dimensions["C"].width = 30
+    def col_w(ws, widths):
+        for i, w in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = w
 
-    # ── Sheet 2: Common Items ─────────────────────────────────────────────
-    ws2 = wb.create_sheet("Common Items")
-    _title(ws2, f"Common/Anchor Items  (Stats = {STATS_APPROVED} only)", 7)
-    hdrs2 = ["Form","QuestionID","Domain","Category","Delta","Stats","Reuse Count"]
-    for ci, h in enumerate(hdrs2, 1):
-        _hdr(ws2, 2, ci, h)
-    ws2.column_dimensions["A"].width = 22
-    ws2.column_dimensions["B"].width = 18
-    row2 = 3
-    for fname, anchor_df in anchor_map.items():
-        if anchor_df.empty:
-            continue
-        for _, row in anchor_df.iterrows():
-            delta = float(pd.to_numeric(row.get(dcol, 0.0), errors="coerce") or 0.0)
-            for ci, v in enumerate([
-                fname,
-                row.get("QuestionID",""),
-                row.get(domain_col,""),
-                row.get("Category", row.get("الناتج","")),
-                round(delta,4),
-                row.get(equating_params.stats_col, STATS_APPROVED),
-                1,
-            ], 1):
-                ws2.cell(row=row2, column=ci, value=v)
-            row2 += 1
+    n_forms    = len(analyses)
+    theta_grid = analyses[0].theta_grid
 
-    # ── Sheet 3: Domain Comparison ────────────────────────────────────────
-    ws3 = wb.create_sheet("Domain Comparison")
-    _title(ws3, "Domain Distribution Comparison", 4)
-    _hdr(ws3, 2, 1, "Form A"); _hdr(ws3, 2, 2, "Form B")
-    _hdr(ws3, 2, 3, "Similarity Score"); _hdr(ws3, 2, 4, "Status")
-    row3 = 3
-    for i in range(n_forms):
-        for j in range(i+1, n_forms):
-            score = _domain_balance_score(results[i][0], results[j][0], domain_col)
-            thresh = equating_params.domain_balance_pct / 100.0
-            status = "✓ Balanced" if score >= thresh else "⚠ Imbalanced"
-            for ci, v in enumerate([form_names[i], form_names[j],
-                                     f"{score:.1%}", status], 1):
-                ws3.cell(row=row3, column=ci, value=v)
-            row3 += 1
-
-    # ── Sheet 4: Difficulty Comparison ───────────────────────────────────
-    ws4 = wb.create_sheet("Difficulty Comparison")
-    _title(ws4, "Difficulty Statistics Comparison", 5)
-    for ci, h in enumerate(["Form","Mean P-value","Min P-value",
-                              "Max P-value","Mean Delta"], 1):
-        _hdr(ws4, 2, ci, h)
-    for ri, (fname, (form, mean_d, _)) in enumerate(
-            zip(form_names, results), 3):
-        diffs = pd.to_numeric(form.get(dcol, pd.Series(dtype=float)),
-                               errors="coerce").dropna()
-        deltas = diffs   # Difficulty IS Delta (no conversion)
-        for ci, v in enumerate([
-            fname,
-            round(float(diffs.mean()), 4) if not diffs.empty else "N/A",
-            round(float(diffs.min()),  4) if not diffs.empty else "N/A",
-            round(float(diffs.max()),  4) if not diffs.empty else "N/A",
-            round(float(deltas.mean()),4) if not deltas.empty else "N/A",
-        ], 1):
-            ws4.cell(row=ri, column=ci, value=v)
-
-    # ── Sheet 5: TIF Comparison ───────────────────────────────────────────
-    ws5 = wb.create_sheet("TIF Comparison")
-    _title(ws5, f"TIF Comparison ({psychometric_mode.upper()})",
-           n_forms + 1)
-    _hdr(ws5, 2, 1, "Theta")
-    for ci, n in enumerate(form_names, 2):
-        _hdr(ws5, 2, ci, n)
-    for ri, th in enumerate(theta_grid, 3):
-        ws5.cell(row=ri, column=1, value=round(float(th), 2))
-        for ci, fname in enumerate(form_names, 2):
-            val = 0.0
-            if psychometric_mode == "1pl" and analyses_1pl:
-                fa = next((x for x in analyses_1pl if x.form_name==fname), None)
-                if fa: val = float(fa.tif[ri-3])
-            elif analyses_3pl:
-                fa = next((x for x in analyses_3pl if x and x.name==fname), None)
-                if fa: val = float(fa.tif[ri-3])
-            ws5.cell(row=ri, column=ci, value=round(val, 6))
-    n_th = len(theta_grid)
-    ch5 = LineChart(); ch5.title = f"TIF ({psychometric_mode.upper()})"
-    ch5.y_axis.title = "Information"; ch5.x_axis.title = "θ"
-    dr5 = Reference(ws5, min_col=2, min_row=2, max_col=1+n_forms, max_row=2+n_th)
-    cr5 = Reference(ws5, min_col=1, min_row=3, max_row=2+n_th)
-    ch5.add_data(dr5, titles_from_data=True); ch5.set_categories(cr5)
-    ch5.width = 18; ch5.height = 12
-    ws5.add_chart(ch5, f"{get_column_letter(n_forms+3)}3")
-
-    # ── Sheet 6: TCC Comparison ───────────────────────────────────────────
-    ws6 = wb.create_sheet("TCC Comparison")
-    _title(ws6, f"TCC Comparison ({psychometric_mode.upper()})",
-           n_forms + 1)
-    _hdr(ws6, 2, 1, "Theta")
-    for ci, n in enumerate(form_names, 2):
-        _hdr(ws6, 2, ci, n)
-    for ri, th in enumerate(theta_grid, 3):
-        ws6.cell(row=ri, column=1, value=round(float(th), 2))
-        for ci, fname in enumerate(form_names, 2):
-            val = 0.0
-            if psychometric_mode == "1pl" and analyses_1pl:
-                fa = next((x for x in analyses_1pl if x.form_name==fname), None)
-                if fa: val = float(fa.tcc[ri-3])
-            elif analyses_3pl:
-                fa = next((x for x in analyses_3pl if x and x.name==fname), None)
-                if fa: val = float(fa.tcc[ri-3])
-            ws6.cell(row=ri, column=ci, value=round(val, 4))
-    ch6 = LineChart(); ch6.title = f"TCC ({psychometric_mode.upper()})"
-    ch6.y_axis.title = "Expected Score"; ch6.x_axis.title = "θ"
-    dr6 = Reference(ws6, min_col=2, min_row=2, max_col=1+n_forms, max_row=2+n_th)
-    cr6 = Reference(ws6, min_col=1, min_row=3, max_row=2+n_th)
-    ch6.add_data(dr6, titles_from_data=True); ch6.set_categories(cr6)
-    ch6.width = 18; ch6.height = 12
-    ws6.add_chart(ch6, f"{get_column_letter(n_forms+3)}3")
-
-    # ── Sheet 7: Overlap Statistics ───────────────────────────────────────
-    ws7 = wb.create_sheet("Overlap Statistics")
-    _title(ws7, "Anchor Overlap Statistics", 3)
-    _hdr(ws7, 2, 1, "Form"); _hdr(ws7, 2, 2, "Anchor Count")
-    _hdr(ws7, 2, 3, "Actual Overlap %")
-    for ri, (fname, (form, _, _)) in enumerate(zip(form_names, results), 3):
-        anchor_df = anchor_map.get(fname, pd.DataFrame())
-        n_anchor  = len(anchor_df)
-        pct = round(100.0 * n_anchor / max(len(form), 1), 1)
-        for ci, v in enumerate([fname, n_anchor, f"{pct}%"], 1):
-            ws7.cell(row=ri, column=ci, value=v)
-
-    # ── Sheet 8: Exposure Analysis ────────────────────────────────────────
-    ws8 = wb.create_sheet("Exposure Analysis")
-    _title(ws8, "Item Exposure Across All Forms", 4)
-    _hdr(ws8, 2, 1, "QuestionID"); _hdr(ws8, 2, 2, "Times Used")
-    _hdr(ws8, 2, 3, "Exposure Rate (%)"); _hdr(ws8, 2, 4, "Domain")
-    exposure: dict[str, dict] = {}
-    for (form, _, _) in results:
-        if "QuestionID" not in form.columns:
-            continue
-        for _, row in form.iterrows():
-            qid = str(row.get("QuestionID",""))
-            if qid not in exposure:
-                exposure[qid] = {
-                    "count": 0,
-                    "domain": str(row.get(domain_col,"")) if domain_col in row.index else "",
+    # Collect the global item pool once (all unique items across forms)
+    seen: dict[str, dict] = {}
+    for fa in analyses:
+        for i, qid in enumerate(fa.item_ids):
+            if qid not in seen:
+                seen[qid] = {
+                    "domain":    fa.domains[i]    if i < len(fa.domains)    else "",
+                    "category":  fa.categories[i] if i < len(fa.categories) else "",
+                    "delta":     float(fa.deltas[i]),
+                    "label":     fa.labels[i],
+                    "uses":      fa.usage_counts[i],
+                    "form_ids":  fa.form_ids_map[i],
                 }
-            exposure[qid]["count"] += 1
-    for ri, (qid, info) in enumerate(exposure.items(), 3):
-        pct = round(100.0 * info["count"] / max(n_forms, 1), 1)
-        for ci, v in enumerate([qid, info["count"], f"{pct}%", info["domain"]], 1):
-            ws8.cell(row=ri, column=ci, value=v)
+
+    # ── Sheet 1: Item Statistics ──────────────────────────────────────────
+    ws1 = wb.create_sheet("Item Statistics")
+    title(ws1, "1PL Item Statistics", 12)
+    cols1 = ["Item ID","Domain","Subdomain","Stage","Level/Part",
+             "Delta (Difficulty)","Difficulty Label",
+             "Item Mean","Item Usage Count",
+             "Exposure Rate (%)","Form IDs","Status"]
+    for ci, h in enumerate(cols1, 1): hdr(ws1, 2, ci, h)
+    col_w(ws1, [16,12,14,9,10,16,16,11,16,16,24,12])
+
+    for ri, (qid, info) in enumerate(seen.items(), 3):
+        exp_rate = round(100.0 * info["uses"] / max(n_forms, 1), 1)
+        fill = ALT if ri % 2 == 0 else PatternFill()
+        for ci, v in enumerate([
+            qid, info["domain"], info["category"], "", "",
+            round(info["delta"], 4), info["label"],
+            round(info["delta"], 4),      # Item Mean ≈ Delta for 1PL
+            info["uses"], exp_rate,
+            info["form_ids"], "Active",
+        ], 1):
+            ws1.cell(row=ri, column=ci, value=v).fill = fill
+
+    # ── Sheet 2: Form Summary ─────────────────────────────────────────────
+    ws2 = wb.create_sheet("Form Summary")
+    title(ws2, "1PL Form Summary", 9)
+    for ci, h in enumerate(["Form","N Items","Mean Delta","Min Delta",
+                              "Max Delta","Easy","Medium","Hard",
+                              "Easy%"], 1): hdr(ws2, 2, ci, h)
+    col_w(ws2, [22,9,12,11,11,8,9,8,9])
+    for ri, fa in enumerate(analyses, 3):
+        fill = ALT if ri % 2 == 0 else PatternFill()
+        easy_pct = round(100.0 * fa.n_easy / max(fa.n_items, 1), 1)
+        for ci, v in enumerate([
+            fa.form_name, fa.n_items,
+            round(fa.mean_delta, 4), round(fa.min_delta, 4), round(fa.max_delta, 4),
+            fa.n_easy, fa.n_medium, fa.n_hard, f"{easy_pct}%",
+        ], 1):
+            ws2.cell(row=ri, column=ci, value=v).fill = fill
+
+    # ── Sheet 3: TCC Data ─────────────────────────────────────────────────
+    ws3 = wb.create_sheet("TCC Data")
+    title(ws3, "Test Characteristic Curves (1PL)", n_forms + 1)
+    hdr(ws3, 2, 1, "Theta")
+    for ci, fa in enumerate(analyses, 2): hdr(ws3, 2, ci, fa.form_name)
+    n_th = len(theta_grid)
+    for ri, th in enumerate(theta_grid, 3):
+        ws3.cell(row=ri, column=1, value=round(float(th), 2))
+        for ci, fa in enumerate(analyses, 2):
+            ws3.cell(row=ri, column=ci, value=round(float(fa.tcc[ri-3]), 4))
+    ch3 = LineChart(); ch3.title = "TCC (1PL)"; ch3.style = 10
+    ch3.y_axis.title = "Expected Score"; ch3.x_axis.title = "Ability (θ)"
+    dr3 = Reference(ws3, min_col=2, min_row=2, max_col=1+n_forms, max_row=2+n_th)
+    cr3 = Reference(ws3, min_col=1, min_row=3, max_row=2+n_th)
+    ch3.add_data(dr3, titles_from_data=True); ch3.set_categories(cr3)
+    ch3.width = 18; ch3.height = 12
+    ws3.add_chart(ch3, f"{get_column_letter(n_forms+3)}3")
+
+    # ── Sheet 4: TIF Data ─────────────────────────────────────────────────
+    ws4 = wb.create_sheet("TIF Data")
+    title(ws4, "Test Information Functions (1PL)", n_forms + 1)
+    hdr(ws4, 2, 1, "Theta")
+    for ci, fa in enumerate(analyses, 2): hdr(ws4, 2, ci, fa.form_name)
+    for ri, th in enumerate(theta_grid, 3):
+        ws4.cell(row=ri, column=1, value=round(float(th), 2))
+        for ci, fa in enumerate(analyses, 2):
+            ws4.cell(row=ri, column=ci, value=round(float(fa.tif[ri-3]), 6))
+    ch4 = LineChart(); ch4.title = "TIF (1PL)"; ch4.style = 10
+    ch4.y_axis.title = "Information"; ch4.x_axis.title = "Ability (θ)"
+    dr4 = Reference(ws4, min_col=2, min_row=2, max_col=1+n_forms, max_row=2+n_th)
+    cr4 = Reference(ws4, min_col=1, min_row=3, max_row=2+n_th)
+    ch4.add_data(dr4, titles_from_data=True); ch4.set_categories(cr4)
+    ch4.width = 18; ch4.height = 12
+    ws4.add_chart(ch4, f"{get_column_letter(n_forms+3)}3")
+
+    # ── Sheet 5: Difficulty Distribution ─────────────────────────────────
+    ws5 = wb.create_sheet("Difficulty Distribution")
+    title(ws5, "Difficulty Distribution by Form (1PL)", 4)
+    for ci, h in enumerate(["Form","Easy","Medium","Hard"], 1): hdr(ws5, 2, ci, h)
+    col_w(ws5, [22,8,9,8])
+    for ri, fa in enumerate(analyses, 3):
+        fill = ALT if ri % 2 == 0 else PatternFill()
+        for ci, v in enumerate([fa.form_name, fa.n_easy, fa.n_medium, fa.n_hard], 1):
+            ws5.cell(row=ri, column=ci, value=v).fill = fill
+    ch5 = BarChart(); ch5.type = "col"; ch5.grouping = "clustered"
+    ch5.title = "Difficulty Distribution (1PL)"
+    ch5.y_axis.title = "Count"; ch5.style = 10
+    dr5 = Reference(ws5, min_col=2, min_row=2, max_col=4, max_row=2+n_forms)
+    cr5 = Reference(ws5, min_col=1, min_row=3, max_row=2+n_forms)
+    ch5.add_data(dr5, titles_from_data=True); ch5.set_categories(cr5)
+    ch5.width = 16; ch5.height = 10
+    ws5.add_chart(ch5, "F3")
+
+    # ── Sheet 6: Exposure Analysis ────────────────────────────────────────
+    ws6 = wb.create_sheet("Exposure Analysis")
+    title(ws6, "Item Exposure Analysis (1PL)", 5)
+    for ci, h in enumerate(["Item ID","Delta","Label","Times Used",
+                              "Exposure Rate (%)"], 1): hdr(ws6, 2, ci, h)
+    col_w(ws6, [18,12,12,12,16])
+    for ri, (qid, info) in enumerate(seen.items(), 3):
+        exp = round(100.0 * info["uses"] / max(n_forms, 1), 1)
+        fill = ALT if ri % 2 == 0 else PatternFill()
+        for ci, v in enumerate([qid, round(info["delta"],4),
+                                  info["label"], info["uses"], exp], 1):
+            ws6.cell(row=ri, column=ci, value=v).fill = fill
+
+    # ── Sheet 7: Domain Summary ───────────────────────────────────────────
+    ws7 = wb.create_sheet("Domain Summary")
+    title(ws7, "Domain Item Counts per Form (1PL)", 3)
+    for ci, h in enumerate(["Form","Domain","Count"], 1): hdr(ws7, 2, ci, h)
+    col_w(ws7, [22,16,10])
+    row7 = 3
+    from collections import Counter
+    for fa in analyses:
+        dom_counts = Counter(fa.domains)
+        for dom, cnt in sorted(dom_counts.items()):
+            for ci, v in enumerate([fa.form_name, dom, cnt], 1):
+                ws7.cell(row=row7, column=ci, value=v)
+            row7 += 1
 
     wb.save(str(out_path))
-    log.info("Equating report → %s", out_path)
+    log.info("1PL Result → %s", out_path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4157,13 +3652,8 @@ class Mode1Window(_BaseMode):
         self.used_blocks_df: Optional[pd.DataFrame] = None
         self._use_ub_var = tk.BooleanVar(value=False)
         self._adaptive_mean_var = tk.BooleanVar(value=False)
-        # Psychometric model (1PL / 3PL)
-        self._psych_model_var   = tk.StringVar(value="3pl")
-        # Test Equating
-        self._equating_var      = tk.BooleanVar(value=False)
-        self._eq_method_var     = tk.StringVar(value="bank_stats")
-        self._eq_overlap_var    = tk.StringVar(value="20")
-        self._eq_balance_var    = tk.StringVar(value="90")
+        # Psychometric model (1PL / 3PL) — new optional feature
+        self._psych_model_var = tk.StringVar(value="3pl")
         # Feature 2 — Difficulty scope
         self._diff_scope_var = tk.StringVar(value="exam")
         # Feature 3 — Difficulty method
@@ -4605,83 +4095,30 @@ class Mode1Window(_BaseMode):
         self._sim_n = self._le(pf, "Simulation students:", 11, "3000")
         self._seed  = self._le(pf, "RNG Seed (blank=random):", 12, "")
 
+        # ── Psychometric Model selector (new optional feature) ─────────────────
+        pm_frm = tk.LabelFrame(pf, text="Psychometric Model",
+                               bg=BG_L, fg=BG_D, font=FH, padx=8, pady=6)
+        pm_frm.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(4, 2))
+        pm_row = tk.Frame(pm_frm, bg=BG_L); pm_row.pack(fill="x")
+        for val, lbl, tip in [
+            ("3pl", "3PL  (default — existing behaviour)",
+             "Full 3-parameter model  ·  no change"),
+            ("1pl", "1PL  (Rasch / Delta-only)",
+             "Generates 1PL_Result.xlsx  ·  uses Difficulty as Delta directly"),
+        ]:
+            tk.Radiobutton(pm_row, text=lbl, variable=self._psych_model_var,
+                           value=val, bg=BG_L, fg=TXD, font=FB,
+                           activebackground=BG_L).pack(side="left", padx=(0, 8))
+        tk.Label(pm_frm,
+                 text="1PL: Delta = bank Difficulty  ·  "
+                      "TCC/TIF use Rasch formula  ·  "
+                      "3PL output unchanged when 3PL is selected",
+                 bg=BG_L, fg="#555",
+                 font=("Segoe UI", 8, "italic")).pack(anchor="w")
+
         # Save settings button
         _btn(pf, "Save & Preview Settings", self._save_settings,
-             bg=BG_D).grid(row=13, column=0, columnspan=2, pady=8)
-
-        # ── Psychometric Model selector ───────────────────────────────────────
-        pm_frm = tk.LabelFrame(p, text="Psychometric Model",
-                               bg=BG_L, fg=BG_D, font=FH, padx=10, pady=8)
-        pm_frm.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4,2))
-        for val, lbl, tip in [
-            ("3pl", "3PL  (3-Parameter Logistic — full model)",
-             "Uses a, b, c  ·  existing default"),
-            ("1pl", "1PL  (Rasch / Delta-only  — simplified model)",
-             "Uses b (Delta) only  ·  also writes 1PL_Result.xlsx"),
-        ]:
-            row_pm = tk.Frame(pm_frm, bg=BG_L); row_pm.pack(fill="x", pady=1)
-            tk.Radiobutton(row_pm, text=lbl, variable=self._psych_model_var,
-                           value=val, bg=BG_L, fg=TXD, font=FB,
-                           activebackground=BG_L).pack(side="left")
-            tk.Label(row_pm, text=f"  {tip}", bg=BG_L, fg="#555",
-                     font=("Segoe UI", 8, "italic")).pack(side="left")
-
-        # ── Test Equating section ─────────────────────────────────────────────
-        eq_frm = tk.LabelFrame(p, text="Test Equating Settings",
-                               bg=BG_L, fg=BG_D, font=FH, padx=10, pady=8)
-        eq_frm.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(2,4))
-
-        eq_top = tk.Frame(eq_frm, bg=BG_L); eq_top.pack(fill="x")
-        tk.Checkbutton(eq_top, text="Enable Test Equating",
-                       variable=self._equating_var,
-                       bg=BG_L, fg=ETEC_BLUE, font=("Segoe UI", 10, "bold"),
-                       activebackground=BG_L,
-                       command=self._on_equating_toggle).pack(side="left")
-        tk.Label(eq_top,
-                 text="  (generates Equating_Report.xlsx after form assembly)",
-                 bg=BG_L, fg="#666", font=("Segoe UI", 8, "italic")).pack(side="left")
-
-        self._eq_detail = tk.Frame(eq_frm, bg=BG_L)
-        self._eq_detail.pack(fill="x", pady=(6,0))
-
-        # Method
-        mth_row = tk.Frame(self._eq_detail, bg=BG_L); mth_row.pack(fill="x")
-        tk.Label(mth_row, text="Equating Method:", bg=BG_L,
-                 fg=TXD, font=FB).pack(side="left", padx=(0,8))
-        for val, lbl in [
-            ("bank_stats",   "Question Bank Statistics"),
-            ("anchor_items", "Common / Anchor Items  (Stats = معتمد only)"),
-        ]:
-            tk.Radiobutton(mth_row, text=lbl, variable=self._eq_method_var,
-                           value=val, bg=BG_L, fg=TXD, font=FB,
-                           activebackground=BG_L).pack(side="left", padx=6)
-
-        # Overlap + Balance
-        num_row = tk.Frame(self._eq_detail, bg=BG_L); num_row.pack(fill="x", pady=4)
-        for lbl, var, tip, col in [
-            ("Overlap Between Forms (%):", self._eq_overlap_var,
-             "0–50%", 0),
-            ("Domain Balance (%):", self._eq_balance_var,
-             "50–100%", 4),
-        ]:
-            tk.Label(num_row, text=lbl, bg=BG_L, fg=TXD,
-                     font=FB).grid(row=0, column=col, sticky="w", padx=(0,4))
-            e = _entry(num_row, w=6)
-            e.insert(0, var.get())
-            e.config(textvariable=var)
-            e.grid(row=0, column=col+1, padx=4)
-            tk.Label(num_row, text=tip, bg=BG_L, fg="#888",
-                     font=("Segoe UI", 8)).grid(row=0, column=col+2, padx=(0,16))
-
-        tk.Label(self._eq_detail,
-                 text="ℹ  For Anchor Items mode: upload a Reference Form "
-                      "(previous Forms.xlsx sheet) via the reference form "
-                      "selector below.",
-                 bg=BG_L, fg=ETEC_NAVY, font=("Segoe UI", 8, "italic")).pack(
-            anchor="w", pady=(4,0))
-
-        # Hide detail by default (enabled = False)
-        self._eq_detail.pack_forget()
+             bg=BG_D).grid(row=14, column=0, columnspan=2, pady=8)
 
         # ── Block ID Settings panel ───────────────────────────────────────────
         bid_frm = tk.LabelFrame(p, text="Block ID Settings",
@@ -4814,14 +4251,6 @@ class Mode1Window(_BaseMode):
                     e = _entry(frm, w=4); e.grid(row=0, column=bi*2+1, padx=2)
                     entries.append(e)
             self._bins_map[cat] = entries
-
-    def _on_equating_toggle(self):
-        """Show/hide equating detail panel based on checkbox state."""
-        if hasattr(self, "_eq_detail"):
-            if self._equating_var.get():
-                self._eq_detail.pack(fill="x", pady=(6,0))
-            else:
-                self._eq_detail.pack_forget()
 
     def _on_method_change(self):
         """Show/hide CCT profile combobox based on selected difficulty method."""
@@ -5144,12 +4573,6 @@ class Mode1Window(_BaseMode):
             cct_profile=self._cct_profile_var.get(),
             allow_fallback_reuse=self._fallback_reuse_var.get(),
             psychometric_model=self._psych_model_var.get(),
-            equating=EquatingParams(
-                enabled=self._equating_var.get(),
-                method=self._eq_method_var.get(),
-                overlap_pct=float(self._eq_overlap_var.get() or 20),
-                domain_balance_pct=float(self._eq_balance_var.get() or 90),
-            ) if self._equating_var.get() else None,
         )
         return {"n_forms": n_forms, "params": params,
                 "n_students": ii(self._sim_n, "Simulation students"),
@@ -5176,7 +4599,7 @@ class Mode1Window(_BaseMode):
             self._lg(f"Starting assembly: {n} forms  [{bank_label}, "
                      f"{len(active_bank)} questions]…")
             self._lg(f"  Block IDs: {names[0]} … {names[-1]}", ETEC_TEAL)
-            results, equating_anchor_map = assemble_forms(active_bank, params, "Difficulty", n, names)
+            results = assemble_forms(active_bank, params, "Difficulty", n, names)
             self._q.put(("prog", 40))
             for (form, mean_d, warns), name in zip(results, names):
                 for w in warns: self._lg(f"  ⚠ {w}", "yellow")
@@ -5217,48 +4640,46 @@ class Mode1Window(_BaseMode):
                 "Difficulty", "D", "Discrimination", "Guessing",
                 usage, fp, mode=1)
             valid = [fa for fa in analyses if fa]
-            if valid: write_analysis_workbook(valid, ap)
 
-            # ── 1PL Result ──────────────────────────────────────────────────
+            # ── Psychometric output: 3PL or 1PL depending on selection ─────
+            psych_model = p["params"].psychometric_model
             pl1_path = None
-            if getattr(p["params"], "psychometric_model", "3pl") == "1pl":
+
+            if psych_model == "1pl":
+                # ── 1PL mode: write 1PL_Result.xlsx, skip 3PL analysis ──────
                 pl1_path = out_dir / "1PL_Result.xlsx"
                 try:
-                    ua_1pl = [
-                        analyse_form_1pl(r[0], nm, "Difficulty", "D",
-                                         "Category", usage)
+                    self._lg("Running 1PL (Rasch) psychometric analysis…")
+                    analyses_1pl = [
+                        analyse_form_1pl(
+                            r[0], nm,
+                            dcol="Difficulty",
+                            domain_col="D",
+                            cat_col="Category",
+                            usage_counter=usage,
+                            all_results=results,
+                        )
                         for r, nm in zip(results, names)
                     ]
-                    ua_1pl = [x for x in ua_1pl if x]
-                    if ua_1pl:
-                        write_1pl_result_workbook(ua_1pl, pl1_path)
-                except Exception as e1:
-                    self._lg(f"  ⚠ 1PL export error: {e1}", "yellow")
+                    analyses_1pl = [x for x in analyses_1pl if x]
+                    if analyses_1pl:
+                        for fa in analyses_1pl:
+                            self._lg(
+                                f"  {fa.form_name}: n={fa.n_items}  "
+                                f"mean_Δ={fa.mean_delta:.3f}  "
+                                f"Easy={fa.n_easy} Med={fa.n_medium} Hard={fa.n_hard}"
+                            )
+                        write_1pl_result_workbook(analyses_1pl, pl1_path)
+                    else:
+                        pl1_path = None
+                        self._lg("  ⚠ 1PL: no valid analyses generated.", "yellow")
+                except Exception as e1pl:
+                    self._lg(f"  ⚠ 1PL export error: {e1pl}", "yellow")
+                    log.exception("1PL export failed")
                     pl1_path = None
-
-            # ── Equating Report ─────────────────────────────────────────────
-            eq_path = None
-            eq_p    = p["params"].equating
-            if eq_p is not None and eq_p.enabled:
-                eq_path = out_dir / "Equating_Report.xlsx"
-                try:
-                    ua_1pl_eq = None
-                    if getattr(p["params"],"psychometric_model","3pl") == "1pl":
-                        ua_1pl_eq = [
-                            analyse_form_1pl(r[0],nm,"Difficulty","D","Category",usage)
-                            for r,nm in zip(results,names)]
-                        ua_1pl_eq = [x for x in ua_1pl_eq if x]
-                    write_equating_report(
-                        results, names, eq_p,
-                        equating_anchor_map, "Difficulty", "D",
-                        getattr(p["params"],"psychometric_model","3pl"),
-                        analyses_3pl=valid,
-                        analyses_1pl=ua_1pl_eq,
-                        out_path=eq_path,
-                    )
-                except Exception as ee:
-                    self._lg(f"  ⚠ Equating report error: {ee}", "yellow")
-                    eq_path = None
+            else:
+                # ── 3PL mode (default — unchanged behaviour) ─────────────────
+                if valid: write_analysis_workbook(valid, ap)
 
             # Feature 5: Charts workbook
             cp = out_dir / "Charts.xlsx"
@@ -5288,9 +4709,10 @@ class Mode1Window(_BaseMode):
             self._q.put(("prog", 100))
             self._lg(f"\n  📁 Output folder   : {out_dir}")
             self._lg(f"  📄 Forms           : {fp.name}")
-            self._lg(f"  📊 3PL Analysis    : {ap.name}")
-            if pl1_path: self._lg(f"  🧪 1PL Result      : {pl1_path.name}")
-            if eq_path:  self._lg(f"  ⚖ Equating Report : {eq_path.name}")
+            if psych_model == "1pl" and pl1_path:
+                self._lg(f"  🧪 1PL Result      : {pl1_path.name}")
+            else:
+                self._lg(f"  📊 3PL Analysis    : {ap.name}")
             if cp: self._lg(f"  📈 Charts          : {cp.name}")
             self._lg(f"  📋 Remaining Qs    : {rp.name}  ({unused_count} questions)")
             self._lg(f"\n  Bank status: {unused_count} unused / "
@@ -5950,7 +5372,7 @@ class Mode2Window(_BaseMode):
                 names = [f"Form_{i+1}" for i in range(n)]
             self._lg(f"Starting assembly: {n} forms  [{bank_label}, {len(df)} questions]…")
             self._lg(f"  Block IDs: {names[0]} … {names[-1]}", ETEC_TEAL)
-            results, equating_anchor_map = assemble_forms(df, params, dcol, n, names)
+            results = assemble_forms(df, params, dcol, n, names)
             self._q.put(("prog", 40))
 
             for (form, mean_d, warns), name in zip(results, names):
