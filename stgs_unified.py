@@ -2479,26 +2479,66 @@ def _wb_fmts(wb):
 # ── per-domain difficulty bar chart (replicates add_subdomain_chart()) ────────
 def _write_domain_chart(wb, ws, domain_df: pd.DataFrame, dcol: str,
                         domain_label: str, sheet_name: str,
-                        col_offset: int, row_offset: int) -> int:
-    """Write bin table + bar chart for one domain. Returns next free row."""
-    counts = [0] * 10
-    for d in domain_df[dcol].dropna():
-        idx = min(int(float(d) * 10), 9)
-        counts[idx] += 1
+                        col_offset: int, row_offset: int,
+                        table_name: str = "",
+                        domain_col: str = "",
+                        domain_value: str = "") -> int:
+    """
+    Write difficulty distribution bin table + bar chart for one domain.
 
+    When `table_name` is supplied the bin counts are written as live
+    COUNTIFS formulas that reference the Excel Table — any edit to the
+    question table (difficulty values, domain changes) instantly refreshes
+    the chart data and the chart itself.
+
+    When `table_name` is empty (legacy / fallback) static Python-computed
+    counts are written instead (original behaviour preserved).
+    """
     fmts = _wb_fmts(wb)
     ws.write(row_offset, col_offset,
              f"{domain_label} — Difficulty Range", fmts["shdr"])
     ws.write(row_offset, col_offset + 1, "Count", fmts["shdr"])
-    for i, (lbl, cnt) in enumerate(zip(BIN_LABELS, counts)):
-        ws.write(row_offset + 1 + i, col_offset,     lbl)
-        ws.write(row_offset + 1 + i, col_offset + 1, cnt)
+
+    for i, lbl in enumerate(BIN_LABELS):
+        lo = round(i * 0.1, 1)
+        hi = round((i + 1) * 0.1, 1)
+        ws.write(row_offset + 1 + i, col_offset, lbl)
+
+        if table_name and domain_col and domain_value:
+            # ── Dynamic COUNTIFS formula ─────────────────────────────────
+            # Last bin uses "<=" so values exactly equal to 1.0 are included.
+            cmp_op  = "<=" if i == 9 else "<"
+            hi_val  = 1.0  if i == 9 else hi
+            formula = (
+                f'=COUNTIFS({table_name}[{domain_col}],"{domain_value}",'
+                f'{table_name}[{dcol}],">="&{lo},'
+                f'{table_name}[{dcol}],"{cmp_op}"&{hi_val})'
+            )
+            ws.write_formula(row_offset + 1 + i, col_offset + 1, formula)
+        elif table_name and dcol:
+            # ── Dynamic without domain filter ────────────────────────────
+            cmp_op = "<=" if i == 9 else "<"
+            hi_val = 1.0  if i == 9 else hi
+            formula = (
+                f'=COUNTIFS({table_name}[{dcol}],">="&{lo},'
+                f'{table_name}[{dcol}],"{cmp_op}"&{hi_val})'
+            )
+            ws.write_formula(row_offset + 1 + i, col_offset + 1, formula)
+        else:
+            # ── Legacy: static count (original behaviour) ────────────────
+            cnt = int((
+                (domain_df[dcol] >= lo) &
+                (domain_df[dcol] < (hi + 0.001 if i == 9 else hi))
+            ).sum()) if dcol in domain_df.columns else 0
+            ws.write(row_offset + 1 + i, col_offset + 1, cnt)
 
     chart = wb.add_chart({"type": "column"})
     chart.add_series({
         "name":       "Q Distribution",
-        "categories": [sheet_name, row_offset+1, col_offset,   row_offset+10, col_offset],
-        "values":     [sheet_name, row_offset+1, col_offset+1, row_offset+10, col_offset+1],
+        "categories": [sheet_name, row_offset+1, col_offset,
+                        row_offset+10, col_offset],
+        "values":     [sheet_name, row_offset+1, col_offset+1,
+                        row_offset+10, col_offset+1],
         "data_labels": {"value": True},
         "fill":        {"color": "#2E75B6"},
     })
@@ -2647,99 +2687,178 @@ def write_forms_workbook(
     form_names: list[str],
     analyses: list[Optional[FormAnalysis]],
     dcol: str,
-    domain_col: str,          # "D" for mode1, "المجال" for mode2
+    domain_col: str,      # "D" for mode 1, "المجال" for mode 2
     acol: str,
     ccol: str,
-    question_usage: dict,     # original_index → total use count
+    question_usage: dict,
     out_path: Path,
     mode: int,
 ):
+    """
+    Write one sheet per form.
+
+    Dynamic synchronisation
+    -----------------------
+    The question table is converted to an Excel Table (ListObject / named
+    table).  Every metric in the summary header, every domain column, and
+    every difficulty-distribution bin count is written as a live Excel
+    formula that references the table by name.
+
+    This means:
+    • Editing any cell in the question table (Difficulty, D, Category, …)
+      automatically refreshes ALL metrics, statistics, and charts in the
+      same sheet — no VBA, no manual refresh.
+    • Adding or removing rows inside the table expands/contracts all
+      calculations automatically because Excel Table structured references
+      grow with the table.
+    • Charts reference the formula cells, so they also update live.
+
+    Static values retained
+    ----------------------
+    Cronbach Alpha and Item Correlation come from the Python 3PL simulation
+    and are written as static numbers (they cannot be recomputed from the
+    item table alone using only Excel formulas).
+    """
+    import re as _re
+
     wb   = xlsxwriter.Workbook(str(out_path))
     fmts = _wb_fmts(wb)
-    fa_map = {fa.name: fa for fa in analyses if fa}
+    fa_map      = {fa.name: fa for fa in analyses if fa}
     export_cols = M1_EXPORT_COLS if mode == 1 else M2_EXPORT_COLS
+    n_item_cols = len(export_cols)
 
-    for (form_df, mean_d, warns), name in zip(results, form_names):
-        ws = wb.add_worksheet(name[:31])
+    for form_idx, ((form_df, mean_d, warns), name) in enumerate(
+            zip(results, form_names)):
+
+        sheet_name = name[:31]
+        ws = wb.add_worksheet(sheet_name)
+        if mode == 2:
+            ws.right_to_left()
+
         df = form_df.reset_index(drop=True)
         fa = fa_map.get(name)
 
-        # ── Summary header ──────────────────────────────────────────────────
-        ws.merge_range("A1:D1", name, fmts["ttl"])
+        # ── Excel Table name ─────────────────────────────────────────────────
+        # Rules: unique across workbook, alphanumeric + underscore, must
+        # NOT look like a cell reference (e.g. "F1", "A10", "R2C3").
+        # Safest approach: always prefix with "QTable" + form index.
+        tbl_name = f"QTable{form_idx + 1}"
+
+        # ── Discover domains present in this form ────────────────────────────
+        if domain_col in df.columns:
+            domains = sorted(
+                str(d) for d in df[domain_col].dropna().unique() if str(d).strip()
+            )
+        else:
+            domains = []
+
+        # ── Column widths ────────────────────────────────────────────────────
+        ws.set_column(0, 0, 32)
+        ws.set_column(1, 1, 14)
+        for di in range(len(domains)):
+            ws.set_column(2 + di, 2 + di, 16)
+
+        # ── Title row ────────────────────────────────────────────────────────
+        n_summary_cols = max(2 + len(domains), 4)
+        ws.merge_range(0, 0, 0, n_summary_cols - 1, name, fmts["ttl"])
         ws.set_row(0, 22)
 
-        # Column widths for the summary block
-        ws.set_column(0, 0, 30)   # Metric label
-        ws.set_column(1, 1, 14)   # Overall value
+        # ── Summary header row ───────────────────────────────────────────────
+        ws.write(2, 0, "Metric",  fmts["shdr"])
+        ws.write(2, 1, "Overall", fmts["shdr"])
+        for di, dom in enumerate(domains):
+            ws.write(2, 2 + di, f"Domain: {dom}", fmts["shdr"])
 
-        # ── Overall metrics (left block, columns A-B) ────────────────────────
-        overall_metrics = [
-            ("Number of Items",           len(df),                             False),
-            ("Mean Difficulty",           df[dcol].mean() if dcol in df else "—", True),
-            ("Min Difficulty",            df[dcol].min()  if dcol in df else "—", True),
-            ("Max Difficulty",            df[dcol].max()  if dcol in df else "—", True),
-            ("Avg Discrimination (a)",    df[acol].mean() if acol in df else "—", True),
-            ("Simulated Cronbach Alpha",  fa.alpha     if fa else "—",             True),
-            ("Simulated Item Correlation",fa.item_corr if fa else "—",             True),
-        ]
-        ws.write(2, 0, "Metric",        fmts["shdr"])
-        ws.write(2, 1, "Overall",       fmts["shdr"])
-        for ri, (lbl, val, is_f) in enumerate(overall_metrics):
-            r = 3 + ri
-            ws.write(r, 0, lbl, fmts["mlbl"])
-            if isinstance(val, str):
-                ws.write(r, 1, val, fmts["dat"])
-            elif is_f and val is not None:
-                try:    ws.write_number(r, 1, float(val), fmts["mval"])
-                except: ws.write(r, 1, str(val), fmts["dat"])
-            else:
-                ws.write_number(r, 1, int(val) if val else 0, fmts["mvi"])
+        # ── Helper: write one metric row ─────────────────────────────────────
+        def _metric(row_idx: int, label: str,
+                    overall,          # str formula, numeric, or "—"
+                    dom_vals: list,   # per-domain: str formula, numeric, or "—"
+                    is_float: bool):
+            ws.write(row_idx, 0, label, fmts["mlbl"])
+            num_fmt = fmts["mval"] if is_float else fmts["mvi"]
 
-        # ── Per-D-domain stats (columns C onwards, one column per domain) ────
-        if domain_col in df.columns:
-            domains = [d for d in df[domain_col].dropna().unique()
-                       if str(d).strip()]
-            dom_start_col = 2          # column C = index 2
-            for di, dom in enumerate(domains):
-                col_idx = dom_start_col + di
-                col_w   = 14
-                ws.set_column(col_idx, col_idx, col_w)
-                sub = df[df[domain_col] == dom]
-                sub_diff = pd.to_numeric(sub[dcol], errors="coerce").dropna() \
-                           if dcol in sub.columns else pd.Series(dtype=float)
+            def _put(row, col, val):
+                if isinstance(val, str) and val.startswith("="):
+                    ws.write_formula(row, col, val, num_fmt)
+                elif isinstance(val, str):
+                    ws.write(row, col, val, fmts["dat"])
+                elif val is None or (isinstance(val, float) and math.isnan(val)):
+                    ws.write(row, col, "—", fmts["dat"])
+                else:
+                    try:
+                        ws.write_number(row, col,
+                                        int(val) if not is_float else float(val),
+                                        num_fmt)
+                    except Exception:
+                        ws.write(row, col, str(val), fmts["dat"])
 
-                # Domain column header
-                ws.write(2, col_idx, f"Domain: {dom}", fmts["shdr"])
+            _put(row_idx, 1, overall)
+            for di, dv in enumerate(dom_vals):
+                _put(row_idx, 2 + di, dv)
 
-                # Rows: N items, Mean, Min, Max for this domain, rest blank
-                domain_metrics = [
-                    len(sub),
-                    float(sub_diff.mean()) if not sub_diff.empty else None,
-                    float(sub_diff.min())  if not sub_diff.empty else None,
-                    float(sub_diff.max())  if not sub_diff.empty else None,
-                    None, None, None,  # Discrimination / Alpha / Corr not per-domain
-                ]
-                for ri, val in enumerate(domain_metrics):
-                    r = 3 + ri
-                    if val is None:
-                        ws.write(r, col_idx, "—", fmts["dat"])
-                    elif ri == 0:
-                        ws.write_number(r, col_idx, int(val), fmts["mvi"])
-                    else:
-                        ws.write_number(r, col_idx, val, fmts["mval"])
+        # Shorthand for formulas
+        TN = tbl_name
+        D  = dcol
+        A  = acol
+        DC = domain_col
 
-        # ── Warnings ────────────────────────────────────────────────────────
+        # Number of Items  — COUNTA / COUNTIF
+        _metric(3, "Number of Items",
+                f'=COUNTA({TN}[QuestionID])',
+                [f'=COUNTIF({TN}[{DC}],"{d}")' for d in domains],
+                False)
+
+        # Mean Difficulty  — AVERAGE / AVERAGEIF
+        _metric(4, "Mean Difficulty",
+                f'=IFERROR(AVERAGE({TN}[{D}]),"—")',
+                [f'=IFERROR(AVERAGEIF({TN}[{DC}],"{d}",{TN}[{D}]),"—")'
+                 for d in domains],
+                True)
+
+        # Min Difficulty  — MIN / MINIFS (Excel 2019+ / 365)
+        _metric(5, "Min Difficulty",
+                f'=IFERROR(MIN({TN}[{D}]),"—")',
+                [f'=IFERROR(MINIFS({TN}[{D}],{TN}[{DC}],"{d}"),"—")'
+                 for d in domains],
+                True)
+
+        # Max Difficulty  — MAX / MAXIFS
+        _metric(6, "Max Difficulty",
+                f'=IFERROR(MAX({TN}[{D}]),"—")',
+                [f'=IFERROR(MAXIFS({TN}[{D}],{TN}[{DC}],"{d}"),"—")'
+                 for d in domains],
+                True)
+
+        # Avg Discrimination  — AVERAGE / AVERAGEIF
+        if acol and acol in df.columns:
+            _metric(7, f"Avg Discrimination ({acol})",
+                    f'=IFERROR(AVERAGE({TN}[{A}]),"—")',
+                    [f'=IFERROR(AVERAGEIF({TN}[{DC}],"{d}",{TN}[{A}]),"—")'
+                     for d in domains],
+                    True)
+        else:
+            _metric(7, "Avg Discrimination", "—", ["—"] * len(domains), True)
+
+        # Cronbach Alpha & Item Correlation — static (from 3PL simulation)
+        alpha = fa.alpha     if fa and not math.isnan(fa.alpha)     else "—"
+        icorr = fa.item_corr if fa and not math.isnan(fa.item_corr) else "—"
+        _metric(8, "Simulated Cronbach Alpha",  alpha, ["—"] * len(domains), True)
+        _metric(9, "Mean Item Correlation",     icorr, ["—"] * len(domains), True)
+
+        # ── Warnings ─────────────────────────────────────────────────────────
         warn_row = 11
         if warns:
             ws.write(warn_row, 0, "⚠ Warnings", fmts["warn"])
             for wi, w in enumerate(warns[:6]):
                 ws.write(warn_row + 1 + wi, 0, w, fmts["warn"])
             warn_row += len(warns[:6]) + 2
-        tbl = warn_row + 1
+        tbl_start = warn_row + 1   # first row of item table (header)
 
-        # ── Item table ──────────────────────────────────────────────────────
+        # ── Item Table data ───────────────────────────────────────────────────
+        # Write data rows BEFORE calling add_table() so we can apply custom
+        # row-level formatting (alternating colours, red for reused items).
+        # add_table() will add the table structure on top.
         for ci, (cn, cw, _) in enumerate(export_cols):
-            ws.write(tbl, ci, cn, fmts["shdr"])
             ws.set_column(ci, ci, cw)
 
         for ri, (_, row) in enumerate(df.iterrows()):
@@ -2748,31 +2867,50 @@ def write_forms_workbook(
             for ci, (cn, _, is_n) in enumerate(export_cols):
                 val = row.get(cn, "")
                 if is_n:
-                    fmt = fmts["nu2"] if ri % 2 else fmts["num"]
-                    try:    ws.write_number(tbl+1+ri, ci, float(val), fmt)
-                    except: ws.write(tbl+1+ri, ci, str(val), fmt)
+                    row_fmt = fmts["nu2"] if ri % 2 else fmts["num"]
+                    try:    ws.write_number(tbl_start + 1 + ri, ci,
+                                            float(val), row_fmt)
+                    except: ws.write(tbl_start + 1 + ri, ci,
+                                     str(val), row_fmt)
                 else:
-                    fmt = (fmts["red"] if reused
-                           else (fmts["da2"] if ri % 2 else fmts["dat"]))
-                    ws.write(tbl+1+ri, ci, str(val) if val is not None else "", fmt)
+                    row_fmt = (fmts["red"] if reused
+                               else (fmts["da2"] if ri % 2 else fmts["dat"]))
+                    ws.write(tbl_start + 1 + ri, ci,
+                             str(val) if val is not None else "", row_fmt)
 
-        ws.autofilter(tbl, 0, tbl + len(df), len(export_cols) - 1)
+        # ── Convert to Excel Table ────────────────────────────────────────────
+        # add_table() overwrites the header row with its own styled headers
+        # (from the 'columns' list) and makes the range a named Table.
+        # Dynamic structured references like TblName[Difficulty] then work
+        # in all formula cells we have already written above.
+        last_data_row = tbl_start + max(len(df), 1)  # need ≥1 data row
+        ws.add_table(tbl_start, 0, last_data_row, n_item_cols - 1, {
+            "name":       tbl_name,
+            "style":      "Table Style Medium 2",
+            "autofilter": True,
+            "columns":    [{"header": cn} for cn, _, _ in export_cols],
+        })
 
-        # ── Per-domain difficulty bar charts (replicates add_subdomain_chart) ──
-        chart_col = len(export_cols) + 2
-        chart_row = tbl
+        ws.freeze_panes(tbl_start + 1, 0)
+
+        # ── Per-domain difficulty distribution charts (formula-driven) ────────
+        chart_col = n_item_cols + 2
+        chart_row = tbl_start
         if domain_col in df.columns:
             for dom in df[domain_col].dropna().unique():
                 sub = df[df[domain_col] == dom]
-                if dcol in sub.columns:
-                    chart_row = _write_domain_chart(
-                        wb, ws, sub, dcol, str(dom), name[:31],
-                        chart_col, chart_row)
+                chart_row = _write_domain_chart(
+                    wb, ws, sub, dcol, str(dom), sheet_name,
+                    chart_col, chart_row,
+                    table_name=tbl_name,
+                    domain_col=domain_col,
+                    domain_value=str(dom),
+                )
 
-        # ── 3PL charts (score hist, ICC, SEM) ───────────────────────────────
+        # ── 3PL charts (live cell-reference charts, not static images) ────────
         if fa:
-            img_row = tbl + len(df) + 4
-            _embed_3pl_charts(wb, ws, fa, img_row, sheet_name=name[:31])
+            img_row = tbl_start + len(df) + 4
+            _embed_3pl_charts(wb, ws, fa, img_row, sheet_name=sheet_name)
 
     wb.close()
     log.info("Forms workbook → %s", out_path)
